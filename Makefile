@@ -1,7 +1,4 @@
 # Blink LN Gateway - Build and Development
-# Adapted from blink-card/Makefile. See _bmad-output/implementation-artifacts/
-# 1-1-bootstrap-the-gateway-repo-with-pinned-deps-and-build-infra.md for the
-# verbatim-vs-adapted file treatment.
 
 .PHONY: build test clean check-code audit-code subgraph-generate subgraph-check supergraph-update \
         clean-db start-db reset-db migrate sqlx-prepare integration-test e2e-up e2e-down e2e-test

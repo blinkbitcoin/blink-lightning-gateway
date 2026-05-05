@@ -3,8 +3,6 @@ name = "blink-ln-gateway"
 version = "0.1.0"
 edition = "2021"
 
-# NO cala-rs dependency — gateway never talks to Cala directly (ADR #2).
-# Cala write-templates live in symphony/src/templates/.
 [dependencies]
 tonic = "0.14"
 sqlx = { version = "0.8.6", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json"] }
@@ -16,4 +14,4 @@ tracing = "0.1"
 async-trait = "0.1"
 prost = "0.14"
 serde = { version = "1.0", features = ["derive"] }
-sqlxmq = { git = "https://github.com/GaloyMoney/sqlxmq", rev = "52c3daf6af55416aefa4b1114e108f968f6c57d4" }
+sqlxmq = "0.6"

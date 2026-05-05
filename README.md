@@ -1,8 +1,6 @@
 # blink-ln-gateway
 
-Native Rust Lightning payment gateway for the Blink platform. C2-Discovery prototype scope: dev/staging only, no production traffic.
-
-Architecture, ADRs, and epic breakdown live in the workspace under `../_bmad-output/planning-artifacts/`.
+Native Rust Lightning payment gateway for the Blink platform. 
 
 ## Setup
 
