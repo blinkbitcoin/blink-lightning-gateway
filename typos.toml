@@ -1,0 +1,7 @@
+files.extend-exclude = [
+  "CHANGELOG.md",
+  "docker-compose.yml",
+  "vendor",
+  "docs/",
+  "_bmad-output/"
+]
