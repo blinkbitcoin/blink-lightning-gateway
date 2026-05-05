@@ -1,4 +1,12 @@
-/target
-/.direnv
-/result
-/.envrc.local
+# Cargo generated files/folders
+target/
+debug/
+
+# Misc
+.direnv
+.DS_Store
+.env
+.env*.local
+_bmad
+.claude
+_bmad-output
