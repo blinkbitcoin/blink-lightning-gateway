@@ -6,10 +6,14 @@
 //! (Epic 2 onwards); this scaffold only declares them.
 
 // Bounded contexts (event-sourced via es-entity)
+//
+// `profile/` was REJECTED per architecture.md L183 (gaps table) — no tenant
+// model in C2-Discovery scope; Profile would land if/when external trust
+// boundaries arrive (C2-Production or beyond). The architecture's L824 tree
+// listing was stale; the rejection wins.
 pub mod htlc;
 pub mod invoice;
 pub mod payment;
-pub mod profile;
 
 // Cross-cutting domain
 pub mod fees;
