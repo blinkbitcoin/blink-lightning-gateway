@@ -1,1 +1,6 @@
-//! Invoice aggregate (per ADR #1). Entity / repo / event / error land in Epic 2.
+//! Invoice aggregate (per ADR #1). DDD shape: entity / repo / event / error. Real implementation lands in Story 1.4.
+
+pub mod entity;
+pub mod error;
+pub mod event;
+pub mod repo;

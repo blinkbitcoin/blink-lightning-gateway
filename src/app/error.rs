@@ -1,0 +1,1 @@
+//! `ServiceError` — application-service error type. `anyhow::Error` is permitted at this boundary per architecture (orchestration errors that span multiple external systems). gRPC `Status` mapping centralized in `src/api/error.rs` (lands with the inbound surface in Story 1.4).
