@@ -1,0 +1,28 @@
+# cargo-audit configuration
+#
+# Read by `cargo audit` (and thus `make audit-code`) from the workspace
+# root automatically.
+
+[advisories]
+# RUSTSEC-2023-0071 — Marvin Attack timing sidechannel in `rsa` 0.9.10.
+#
+# `rsa` is pulled into our dep tree only via `sqlx-mysql`, which itself is
+# pulled in unconditionally by `sqlx-macros-core` because the `sqlx::query!`
+# proc-macros need to know the type system for ALL sqlx backends at compile
+# time, not just the one(s) we link at runtime.
+#
+# We only connect to Postgres (verify: `Cargo.toml` enables the `postgres`
+# feature on sqlx, never the `mysql` feature). The vulnerable RSA code path
+# is in MySQL's `caching_sha2_password` authentication, which we never
+# execute.
+#
+# No fixed upgrade is available upstream (https://rustsec.org/advisories/RUSTSEC-2023-0071).
+# The sqlx maintainers have acknowledged the issue but the fix is
+# blocked on the `rsa` crate itself shipping a non-vulnerable version. This
+# is an industry-wide ignore for sqlx users — see e.g.
+# https://github.com/launchbadge/sqlx/issues/2911.
+#
+# **Re-evaluate when:** `rsa >= 0.10` ships with constant-time decryption,
+# OR sqlx 0.9 introduces a way to disable backend-specific macro support.
+# (Story 5.3 CI hardening sweep would be the right time to revisit.)
+ignore = ["RUSTSEC-2023-0071"]
