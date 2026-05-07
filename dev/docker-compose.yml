@@ -1,0 +1,34 @@
+# Local development Postgres for the gateway. Drives `make start-db /
+# clean-db / migrate / sqlx-prepare`.
+#
+# IMAGE PIN NOTE — `postgres:17-alpine` for local dev.
+# The integration test suite uses `testcontainers-modules 0.12.1`'s
+# `Postgres::default()`, which pins `postgres:11-alpine` (verified at
+# `~/.cargo/registry/.../testcontainers-modules-0.12.1/src/postgres/mod.rs:6`).
+# That divergence is intentional and tracked in deferred-work.md
+# (sqlxmq#56 PG17 vendor-fix needed before testcontainers can bump). Slice 1a
+# does NOT use sqlxmq, so PG17 here is safe; the test image lag is
+# functionally invisible.
+
+name: blink-ln-gateway-dev
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: blink-ln-gateway-pg
+    environment:
+      POSTGRES_DB: blink_ln_gateway
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - blink-ln-gateway-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  blink-ln-gateway-pg-data:

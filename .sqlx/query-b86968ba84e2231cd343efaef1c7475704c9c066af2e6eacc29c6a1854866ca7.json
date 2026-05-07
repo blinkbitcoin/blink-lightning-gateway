@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO outbox_events (\n                correlation_id,\n                domain_event_type,\n                event_type,\n                reference_id,\n                sat_amount,\n                currency,\n                timestamp,\n                gateway_metadata\n            )\n            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)\n            RETURNING sequence\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "sequence",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Int8",
+        "Varchar",
+        "Timestamptz",
+        "Jsonb"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "b86968ba84e2231cd343efaef1c7475704c9c066af2e6eacc29c6a1854866ca7"
+}
