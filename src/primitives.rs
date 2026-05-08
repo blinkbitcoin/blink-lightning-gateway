@@ -1,8 +1,10 @@
 //! Value objects shared across bounded contexts (PaymentHash, MilliSatoshi,
 //! BoltInvoice, Preimage, Timestamp, ids). One newtype per concept; no shared
 //! "smart string" type. Each newtype derives `serde` (transparent) +
-//! `sqlx::Type` so it round-trips through the wire and the DB without
-//! callers reaching past the wrapper.
+//! `sqlx::Type`, so the same `PaymentHash` value (for example) can be
+//! serialized to JSON, sent over the wire, written to Postgres, read back,
+//! and deserialized — all without callers ever extracting the inner bytes
+//! and reconstructing the wrapper themselves.
 
 pub mod bolt_invoice;
 pub mod ids;

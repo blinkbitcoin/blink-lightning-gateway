@@ -9,8 +9,9 @@
 --    webhook ingress: invoices and payments are driven by RPC + LND
 --    subscription, not external pushes. The equivalent dedup surface is the
 --    request-layer idempotency in `idempotency_keys` (see the next migration).
---    The column would be a dead-write here; the SQL comment captures the
---    rationale for future-maintainer.
+--    Adding the column here would mean every insert writes a value that is
+--    never read; the comment is here so a future maintainer reviewing the
+--    schema understands why the divergence is deliberate.
 
 CREATE TABLE outbox_events (
     sequence            BIGSERIAL    PRIMARY KEY,

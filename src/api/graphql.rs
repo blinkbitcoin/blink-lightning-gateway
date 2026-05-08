@@ -1,7 +1,6 @@
-//! GraphQL subgraph (federation v2 via async-graphql 7.0). Slice 1a hosts
-//! the `lnInvoiceCreate` mutation only; the rest of the 27-op surface
-//! arrives via Story 5.1's cookie-cutter expansion. Resolver routes to the
-//! `App` coordinator with no business logic in the resolver itself
+//! GraphQL subgraph (federation v2 via async-graphql 7.0). Slice 1a only
+//! implements `lnInvoiceCreate`; the other 26 operations land in Story
+//! 5.1. Resolvers hold no business logic — they only call into `App`
 //! (architecture L348).
 
 pub mod mutation;

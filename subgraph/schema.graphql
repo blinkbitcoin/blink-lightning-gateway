@@ -1,0 +1,95 @@
+"""
+Concrete error shape returned in `LnInvoicePayload.errors`. Galoy's
+schema declares an `interface Error` with multiple concrete impls;
+Story 5.1 adds the interface and per-error-class types when it builds
+out the remaining 26 operations. Slice 1a returns only the generic
+message.
+"""
+type GraphqlError {
+	message: String!
+}
+
+type LnInvoice {
+	paymentHash: PaymentHash!
+	paymentRequest: LnPaymentRequest!
+	paymentSecret: LnPaymentSecret!
+	satoshis: SatAmount!
+}
+
+input LnInvoiceCreateInput {
+	"""
+	Amount in satoshis.
+	"""
+	amount: SatAmount!
+	"""
+	Optional invoice expiration time in minutes.
+	"""
+	expiresIn: Minutes
+	externalId: TxExternalId
+	"""
+	Optional memo for the lightning invoice.
+	"""
+	memo: Memo
+	"""
+	Wallet ID for a BTC wallet belonging to the current account.
+	"""
+	walletId: WalletId!
+}
+
+type LnInvoicePayload {
+	errors: [GraphqlError!]!
+	invoice: LnInvoice
+}
+
+scalar LnPaymentRequest
+
+scalar LnPaymentSecret
+
+scalar Memo
+
+scalar Minutes
+
+type Mutation {
+	lnInvoiceCreate(input: LnInvoiceCreateInput!): LnInvoicePayload!
+}
+
+scalar PaymentHash
+
+type Query {
+	"""
+	Health probe — always `"ok"`. Federation `_service` is generated
+	automatically; this gives a non-federation client a smoke point.
+	"""
+	ping: String!
+	_service: _Service!
+}
+
+scalar SatAmount
+
+scalar TxExternalId
+
+scalar WalletId
+
+"""
+The `_Any` scalar is used to pass representations of entities from external
+services into the root `_entities` field for execution.
+"""
+scalar _Any
+
+type _Service {
+	sdl: String
+}
+
+"""
+Directs the executor to include this field or fragment only when the `if` argument is true.
+"""
+directive @include(if: Boolean!) on FIELD | FRAGMENT_SPREAD | INLINE_FRAGMENT
+"""
+Directs the executor to skip this field or fragment when the `if` argument is true.
+"""
+directive @skip(if: Boolean!) on FIELD | FRAGMENT_SPREAD | INLINE_FRAGMENT
+schema {
+	query: Query
+	mutation: Mutation
+}
+

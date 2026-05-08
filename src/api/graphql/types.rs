@@ -218,9 +218,10 @@ pub struct LnInvoiceCreateInput {
 }
 
 /// Concrete error shape returned in `LnInvoicePayload.errors`. Galoy's
-/// schema declares an `interface Error` with multiple concrete impls; the
-/// 27-op cookie-cutter expansion (Story 5.1) brings the interface +
-/// per-error-class types. Slice 1a returns only the generic message.
+/// schema declares an `interface Error` with multiple concrete impls;
+/// Story 5.1 adds the interface and per-error-class types when it builds
+/// out the remaining 26 operations. Slice 1a returns only the generic
+/// message.
 #[derive(SimpleObject, Clone, Debug)]
 #[graphql(name = "GraphqlError")]
 pub struct GraphqlError {

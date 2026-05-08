@@ -15,11 +15,13 @@ pub mod htlc;
 pub mod invoice;
 pub mod payment;
 
-// Cross-cutting domain
+// Domain modules shared by every bounded context (invoice, payment, htlc
+// all use these — value objects and fee math).
 pub mod fees;
 pub mod primitives;
 
-// Cross-cutting infrastructure
+// Infrastructure shared by every bounded context (idempotency keys,
+// background-job runner, pg_notify event outbox).
 pub mod idempotency;
 pub mod job;
 pub mod outbox;
