@@ -9,7 +9,7 @@
 //! Slice 1a stubs all three with identity (`Ok(NotSeen)`) so the
 //! `App::create_invoice` use-case has the right shape. Real implementations
 //! land in Story 5.2 (un-stubs) — the schema is already in place from
-//! `migrations/<TS>_idempotency_stubs.up.sql`.
+//! `migrations/<TS>_idempotency_stubs.sql`.
 
 pub mod correlation;
 pub mod event;

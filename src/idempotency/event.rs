@@ -1,7 +1,7 @@
 //! Layer 2 — event-level idempotency.
 //!
 //! STUB(epic-5.2): un-stub to use the `processed_events` table. Schema
-//! already exists from `migrations/<TS>_idempotency_stubs.up.sql`. The
+//! already exists from `migrations/<TS>_idempotency_stubs.sql`. The
 //! real impl checks `(gateway_id, sequence)` membership and records on
 //! first-process so replays are no-ops.
 

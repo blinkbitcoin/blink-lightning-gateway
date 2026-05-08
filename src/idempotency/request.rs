@@ -2,7 +2,7 @@
 //!
 //! STUB(epic-5.2): un-stub three-layer idempotency to use the
 //! `idempotency_keys` table (per architecture L622-630). Schema already
-//! exists from `migrations/<TS>_idempotency_stubs.up.sql`.
+//! exists from `migrations/<TS>_idempotency_stubs.sql`.
 
 use thiserror::Error;
 use uuid::Uuid;
