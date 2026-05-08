@@ -5,7 +5,6 @@
 
 use thiserror::Error;
 
-use crate::idempotency::IdempotencyError;
 use crate::invoice::InvoiceError;
 use crate::lnd::LndError;
 use crate::outbox::OutboxError;
@@ -20,9 +19,6 @@ pub enum AppError {
 
     #[error(transparent)]
     Outbox(#[from] OutboxError),
-
-    #[error(transparent)]
-    Idempotency(#[from] IdempotencyError),
 
     #[error(transparent)]
     Db(#[from] sqlx::Error),

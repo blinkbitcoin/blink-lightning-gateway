@@ -7,11 +7,14 @@
 -- 2. NO `webhook_id` column. blink-card uses webhook_id for defense-in-depth
 --    dedup on its inbound webhook ingress (Visa pushes events at us). LN has no
 --    webhook ingress: invoices and payments are driven by RPC + LND
---    subscription, not external pushes. The equivalent dedup surface is the
---    request-layer idempotency in `idempotency_keys` (see the next migration).
---    Adding the column here would mean every insert writes a value that is
---    never read; the comment is here so a future maintainer reviewing the
---    schema understands why the divergence is deliberate.
+--    subscription, not external pushes. The equivalent dedup surfaces in the
+--    LN gateway are: (a) `external_id` natural-key uniqueness on `invoices`
+--    for client-supplied stable IDs (per ADR-0001, wired in Story 5.2), and
+--    (b) Symphony's own `processed_events` table for consumer-side event dedup
+--    (Symphony's DB, not ours — per ADR-0002). Adding `webhook_id` here would
+--    mean every insert writes a value that is never read; the comment is here
+--    so a future maintainer reviewing the schema understands why the
+--    divergence is deliberate.
 
 CREATE TABLE outbox_events (
     sequence            BIGSERIAL    PRIMARY KEY,

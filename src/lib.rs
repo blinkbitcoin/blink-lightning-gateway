@@ -20,9 +20,8 @@ pub mod payment;
 pub mod fees;
 pub mod primitives;
 
-// Infrastructure shared by every bounded context (idempotency keys,
-// background-job runner, pg_notify event outbox).
-pub mod idempotency;
+// Infrastructure shared by every bounded context (background-job runner,
+// pg_notify event outbox).
 pub mod job;
 pub mod outbox;
 

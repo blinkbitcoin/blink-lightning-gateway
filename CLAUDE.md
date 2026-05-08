@@ -36,7 +36,7 @@ Built from `cargo new`, NOT a fork of `blink-card`. Reference implementations ar
 |---|---|---|
 | `blink/core/api/src/domain/payments/` (TS) | LN state-machine semantics, HTLC/MPP/intraledger logic | TS idioms, MongoDB shapes, medici accounting |
 | `bria/` | DDD bounded contexts, repo patterns — **primary structural reference** | UTXO/on-chain code |
-| `blink-card/` | pg_notify outbox (LISTEN/backfill, batch 1000), three-layer idempotency, Symphony gRPC contract | Card-specific code, file-tree shape |
+| `blink-card/` | pg_notify outbox (LISTEN/backfill, batch 1000), `correlation_id` as a column on the outbox table (no separate idempotency module — see ADR-0002), Symphony gRPC contract | Card-specific code, file-tree shape |
 | `es-entity` | Event-sourcing primitives, repo derive macros | — |
 | `symphony/` | `GatewayEventSource` consumer-side trait; **also where new LN Cala templates land (ADR #2)** | Symphony internals |
 
@@ -46,8 +46,7 @@ Built from `cargo new`, NOT a fork of `blink-card`. Reference implementations ar
 src/
 ├── invoice/  payment/  htlc/   # aggregates: entity.rs + repo.rs + event.rs + error.rs
 ├── primitives/                  # value objects: PaymentHash, MilliSatoshi, Pubkey, BoltInvoice...
-├── outbox/                      # pg_notify EventPublisher (re-derived from blink-card)
-├── idempotency/                 # three-layer idempotency
+├── outbox/                      # pg_notify EventPublisher (correlation_id is a column here; no separate idempotency module — see ADR-0002)
 ├── lnd/  symphony/  api/  app/  # adapters + inbound surfaces + application services
 ```
 

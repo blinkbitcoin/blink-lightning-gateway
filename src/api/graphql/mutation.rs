@@ -11,7 +11,6 @@ use super::types::{
     LnPaymentSecret, PaymentHash as GqlPaymentHash, SatAmount,
 };
 use crate::app::{App, NewInvoiceRequest};
-use crate::idempotency::IdempotencyKey;
 
 pub struct Mutation;
 
@@ -38,7 +37,6 @@ impl Mutation {
             amount_msat: input.amount.to_msat(),
             expiry_seconds,
             memo: input.memo.map(|m| m.0),
-            idempotency_key: IdempotencyKey::new(),
         };
 
         match app.create_invoice(request).await {

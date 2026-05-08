@@ -18,9 +18,6 @@ pub mod error;
 
 pub use error::AppError;
 
-use crate::idempotency::{
-    CorrelationId, IdempotencyKey, IdempotencyKeys, IdempotencyOutcome, ProcessedEvents,
-};
 use crate::invoice::{Invoice, Invoices, NewInvoice};
 use crate::lnd::{AddInvoiceParams, LndApi};
 use crate::outbox::{EventPublisher, NewOutboxEvent};
@@ -47,7 +44,6 @@ pub struct NewInvoiceRequest {
     pub amount_msat: MilliSatoshi,
     pub expiry_seconds: u32,
     pub memo: Option<String>,
-    pub idempotency_key: IdempotencyKey,
 }
 
 /// Application coordinator. Holds the repos + adapter handles + pool. One
@@ -59,9 +55,6 @@ pub struct App {
     lnd: Arc<dyn LndApi>,
     pool: PgPool,
     mode: Mode,
-    idempotency_keys: IdempotencyKeys,
-    #[allow(dead_code)] // wired in Story 1.5's consumer flow (event-level dedup)
-    processed_events: ProcessedEvents,
 }
 
 impl App {
@@ -72,8 +65,6 @@ impl App {
             lnd,
             pool,
             mode: Mode::Live,
-            idempotency_keys: IdempotencyKeys::new(),
-            processed_events: ProcessedEvents::new(),
         }
     }
 
@@ -87,7 +78,6 @@ impl App {
     }
 
     /// `lnInvoiceCreate` use-case. Wires the slice top-to-bottom:
-    ///   0. (STUB) idempotency-key check.
     ///   1. (STUB) wallet-ownership check.
     ///   2. LND `add_invoice` (source of truth for `payment_hash` +
     ///      `bolt_invoice`).
@@ -103,18 +93,6 @@ impl App {
     /// KNOWN-ISSUE(story-4.3): orphan-invoice sweep job lands in chaos tests.
     pub async fn create_invoice(&self, request: NewInvoiceRequest) -> Result<Invoice, AppError> {
         let now = Timestamp::now();
-        let _correlation = CorrelationId::new();
-
-        // 0. STUB(epic-5.2): un-stub three-layer idempotency. Returns
-        //    NotSeen unconditionally in Slice 1a; tables exist but no
-        //    queries fire.
-        let _outcome = self
-            .idempotency_keys
-            .check_or_record(&request.idempotency_key, &[])
-            .await?;
-        if let IdempotencyOutcome::Seen { .. } = _outcome {
-            // Unreachable in Slice 1a; defensively fall through to live path.
-        }
 
         // 1. STUB(epic-5.2): wallet-ownership check. Replace with Apollo
         //    Router entity sub-query + TTL cache (architecture's recommended
@@ -261,7 +239,6 @@ mod tests {
             amount_msat: MilliSatoshi::new(1_000_000),
             expiry_seconds: 3600,
             memo: Some("test".to_owned()),
-            idempotency_key: IdempotencyKey::new(),
         }
     }
 
