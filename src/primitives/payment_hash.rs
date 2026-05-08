@@ -113,6 +113,15 @@ impl<'r> Decode<'r, Postgres> for PaymentHash {
     }
 }
 
+// Required by `EsRepo`'s auto-generated `create_all_in_op`, which binds a
+// `Vec<&PaymentHash>` for batch UNNEST inserts. Forwards to `Vec<u8>`'s array
+// type info — same column type as the single-value Encode impl above.
+impl sqlx::postgres::PgHasArrayType for PaymentHash {
+    fn array_type_info() -> sqlx::postgres::PgTypeInfo {
+        <Vec<u8> as sqlx::postgres::PgHasArrayType>::array_type_info()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

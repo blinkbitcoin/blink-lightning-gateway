@@ -128,6 +128,14 @@ impl<'r> Decode<'r, Postgres> for MilliSatoshi {
     }
 }
 
+// Required by `EsRepo`'s auto-generated `create_all_in_op`, which binds a
+// `Vec<&MilliSatoshi>` for batch UNNEST inserts.
+impl sqlx::postgres::PgHasArrayType for MilliSatoshi {
+    fn array_type_info() -> sqlx::postgres::PgTypeInfo {
+        <i64 as sqlx::postgres::PgHasArrayType>::array_type_info()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
