@@ -13,8 +13,8 @@ build:
 	SQLX_OFFLINE=true cargo build --release
 
 test:
-	@echo "Running tests..."
-	SQLX_OFFLINE=true cargo test
+	@echo "Running unit tests (lib + bins)..."
+	SQLX_OFFLINE=true cargo test --lib --bins
 
 clean:
 	@echo "Cleaning build artifacts..."
@@ -75,8 +75,8 @@ sqlx-prepare:
 	cargo sqlx prepare --workspace -- --tests
 
 integration-test:
-	@echo "Running integration tests"
-	SQLX_OFFLINE=true cargo test --tests
+	@echo "Running integration tests..."
+	SQLX_OFFLINE=true cargo test --test integration
 
 # E2E test environment targets (orchestrated by Tilt) — wire in Story 1.6
 e2e-up:
