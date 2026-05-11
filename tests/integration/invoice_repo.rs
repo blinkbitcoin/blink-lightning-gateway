@@ -3,7 +3,6 @@
 //! `src/invoice/entity.rs` (`try_new_rejects_zero_amount`), so it
 //! doesn't need its own DB-bound test here.
 
-use serial_test::serial;
 
 use blink_lightning_gateway::invoice::entity::NewInvoice;
 use blink_lightning_gateway::invoice::Invoices;
@@ -24,7 +23,6 @@ fn ok_new_invoice() -> NewInvoice {
 }
 
 #[tokio::test]
-#[serial]
 async fn create_then_find_by_payment_hash() {
     let db = TestDatabase::new().await.expect("test db");
     let pool = db.pool.clone();
@@ -44,7 +42,6 @@ async fn create_then_find_by_payment_hash() {
 }
 
 #[tokio::test]
-#[serial]
 async fn maybe_find_by_payment_hash_missing_returns_none() {
     let db = TestDatabase::new().await.expect("test db");
     let pool = db.pool.clone();
@@ -57,7 +54,6 @@ async fn maybe_find_by_payment_hash_missing_returns_none() {
 }
 
 #[tokio::test]
-#[serial]
 async fn create_writes_one_invoices_row_and_one_event_row() {
     let db = TestDatabase::new().await.expect("test db");
     let pool = db.pool.clone();

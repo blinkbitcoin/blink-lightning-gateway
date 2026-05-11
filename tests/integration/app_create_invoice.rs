@@ -5,7 +5,6 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use serial_test::serial;
 
 use blink_lightning_gateway::app::{App, AppError, NewInvoiceRequest};
 use blink_lightning_gateway::lnd::{AddInvoiceParams, AddInvoiceResponse, LndApi, LndError};
@@ -47,7 +46,6 @@ fn ok_request() -> NewInvoiceRequest {
 }
 
 #[tokio::test]
-#[serial]
 async fn create_invoice_persists_invoice_and_event_rows() {
     let db = TestDatabase::new().await.expect("test db");
     let pool = db.pool.clone();
@@ -72,7 +70,6 @@ async fn create_invoice_persists_invoice_and_event_rows() {
 }
 
 #[tokio::test]
-#[serial]
 async fn create_invoice_propagates_invoice_error() {
     let db = TestDatabase::new().await.expect("test db");
     let pool = db.pool.clone();
@@ -87,7 +84,6 @@ async fn create_invoice_propagates_invoice_error() {
 }
 
 #[tokio::test]
-#[serial]
 async fn create_invoice_propagates_lnd_error() {
     let db = TestDatabase::new().await.expect("test db");
     let pool = db.pool.clone();

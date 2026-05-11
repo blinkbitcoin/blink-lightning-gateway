@@ -9,7 +9,6 @@
 use std::time::Duration;
 
 use chrono::Utc;
-use serial_test::serial;
 
 use blink_lightning_gateway::outbox::{
     EventPublisher, GatewayDomainEvent, GatewayEventType, NewOutboxEvent,
@@ -28,7 +27,6 @@ fn invoice_settled_event() -> NewOutboxEvent {
 }
 
 #[tokio::test]
-#[serial]
 async fn publish_in_tx_writes_one_row_with_correct_event_type() {
     let db = TestDatabase::new().await.expect("test db");
     let pool = db.pool.clone();
@@ -52,7 +50,6 @@ async fn publish_in_tx_writes_one_row_with_correct_event_type() {
 }
 
 #[tokio::test]
-#[serial]
 async fn sequence_is_monotonic_across_writes() {
     let db = TestDatabase::new().await.expect("test db");
     let pool = db.pool.clone();
@@ -74,7 +71,6 @@ async fn sequence_is_monotonic_across_writes() {
 }
 
 #[tokio::test]
-#[serial]
 async fn pg_notify_fires_on_gateway_events_channel() {
     use std::future::poll_fn;
     use tokio_postgres::AsyncMessage;

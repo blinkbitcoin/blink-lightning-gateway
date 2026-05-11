@@ -14,7 +14,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
-use serial_test::serial;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::{Channel, Server};
 
@@ -111,7 +110,6 @@ fn template_name_for(event_type: i32) -> &'static str {
 }
 
 #[tokio::test]
-#[serial]
 async fn outbox_row_streams_through_grpc_into_cala_mock() {
     let db = TestDatabase::new().await.expect("test db");
     let pool = db.pool.clone();

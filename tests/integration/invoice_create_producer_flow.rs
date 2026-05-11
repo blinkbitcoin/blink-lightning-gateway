@@ -14,7 +14,6 @@ use std::sync::Arc;
 use async_graphql::Value;
 use async_trait::async_trait;
 use serde_json::json;
-use serial_test::serial;
 
 use blink_lightning_gateway::api::graphql::{build_schema, GatewaySchema};
 use blink_lightning_gateway::app::App;
@@ -61,7 +60,6 @@ const MUTATION: &str = r#"
 "#;
 
 #[tokio::test]
-#[serial]
 async fn ln_invoice_create_persists_invoice_and_event_rows() {
     let db = TestDatabase::new().await.expect("test db");
     let pool = db.pool.clone();

@@ -35,6 +35,5 @@ tonic-prost-build = "0.14"
 [dev-dependencies]
 testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["postgres"] }
-serial_test = "3"
 anyhow = "1"
 mockall = "0.13"
