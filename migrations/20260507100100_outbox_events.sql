@@ -19,11 +19,10 @@
 CREATE TABLE outbox_events (
     sequence            BIGSERIAL    PRIMARY KEY,
     correlation_id      VARCHAR(255) NOT NULL,
-    domain_event_type   VARCHAR(64)  NOT NULL,   -- LN-specific (e.g., lightning_invoice_created)
+    domain_event_type   VARCHAR(64)  NOT NULL,   -- LN-specific (e.g., lightning_invoice_settled)
     event_type          VARCHAR(64)  NOT NULL,   -- standardized 8-event vocabulary (architecture L1042-1052)
     reference_id        VARCHAR(255) NOT NULL,
-    sat_amount          BIGINT       NOT NULL DEFAULT 0,
-    currency            VARCHAR(10)  NOT NULL DEFAULT 'BTC',
+    amount_sat          BIGINT       NOT NULL DEFAULT 0,
     timestamp           TIMESTAMPTZ  NOT NULL,
     gateway_metadata    JSONB        NOT NULL DEFAULT '{}',
     created_at          TIMESTAMPTZ  NOT NULL DEFAULT NOW()

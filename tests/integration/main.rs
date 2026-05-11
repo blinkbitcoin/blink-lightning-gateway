@@ -2,7 +2,10 @@
 // pulls in every file in this folder via `mod`. Adding a new integration
 // test = drop a file here and add one `mod` line.
 
+mod common;
+
 mod app_create_invoice;
+mod invoice_consumer_flow;
 mod invoice_create_producer_flow;
 mod invoice_repo;
 mod outbox_publisher;

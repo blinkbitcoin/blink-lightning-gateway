@@ -47,3 +47,11 @@ pub mod server;
 pub mod dev_constants;
 pub mod scope;
 pub mod tracing;
+
+// Generated proto modules. Compiled by `build.rs` from the files in
+// `proto/` and dropped into `OUT_DIR`; we re-export them at crate root so
+// downstream call sites read `crate::lightning_payment_gateway::*` and
+// match the import shape in blink-card.
+pub mod lightning_payment_gateway {
+    tonic::include_proto!("lightning_payment_gateway");
+}

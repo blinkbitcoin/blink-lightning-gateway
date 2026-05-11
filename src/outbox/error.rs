@@ -1,8 +1,4 @@
-//! `OutboxError` — typed errors for the outbox publisher path.
-//!
-//! The `ListenDisconnected` variant lands in Story 1.5 alongside
-//! `listen_connection.rs`; Slice 1a only writes, never listens (tests open a
-//! throwaway `tokio_postgres::LISTEN` inline).
+//! `OutboxError` — typed errors for the outbox publisher and listener.
 
 use thiserror::Error;
 
@@ -16,4 +12,10 @@ pub enum OutboxError {
 
     #[error("outbox metadata serialization failed: {0}")]
     Metadata(#[from] serde_json::Error),
+
+    #[error("LISTEN connection lost")]
+    ListenDisconnected,
+
+    #[error("outbox listener configuration error: {0}")]
+    Configuration(String),
 }

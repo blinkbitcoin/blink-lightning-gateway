@@ -9,8 +9,10 @@
 
 pub mod entity;
 pub mod error;
+pub mod listen_connection;
 pub mod publisher;
 
 pub use entity::{GatewayDomainEvent, GatewayEventType, NewOutboxEvent, OutboxEvent};
 pub use error::OutboxError;
-pub use publisher::EventPublisher;
+pub use listen_connection::ListenConnection;
+pub use publisher::{EventPublisher, MAX_BACKFILL_EVENTS};

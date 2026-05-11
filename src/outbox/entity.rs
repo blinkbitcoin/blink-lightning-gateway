@@ -16,6 +16,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use super::error::OutboxError;
+use crate::lightning_payment_gateway as proto;
 
 /// Standardized 8-event vocabulary — same shape as
 /// `blink-card/proto/card_payment_gateway.proto::GatewayEventType`. Field
@@ -46,6 +47,25 @@ impl GatewayEventType {
             Self::IncomingPaymentCanceled => "INCOMING_PAYMENT_CANCELED",
         }
     }
+
+    /// Map this hand-written enum onto the prost-generated proto enum.
+    /// Both enums carry identical SCREAMING_SNAKE_CASE variant names and
+    /// integer tags 1..=8, so the variants line up 1:1. The hand-written
+    /// copy stays so domain code does not have to import the
+    /// prost-generated proto module just to log or pattern-match an
+    /// event type.
+    pub fn to_proto(self) -> proto::GatewayEventType {
+        match self {
+            Self::OutgoingPaymentInitiated => proto::GatewayEventType::OutgoingPaymentInitiated,
+            Self::OutgoingPaymentCompleted => proto::GatewayEventType::OutgoingPaymentCompleted,
+            Self::OutgoingPaymentFailed => proto::GatewayEventType::OutgoingPaymentFailed,
+            Self::OutgoingPaymentReversed => proto::GatewayEventType::OutgoingPaymentReversed,
+            Self::IncomingPaymentReceived => proto::GatewayEventType::IncomingPaymentReceived,
+            Self::IncomingPaymentPending => proto::GatewayEventType::IncomingPaymentPending,
+            Self::IncomingPaymentConfirmed => proto::GatewayEventType::IncomingPaymentConfirmed,
+            Self::IncomingPaymentCanceled => proto::GatewayEventType::IncomingPaymentCanceled,
+        }
+    }
 }
 
 impl fmt::Display for GatewayEventType {
@@ -71,33 +91,40 @@ impl FromStr for GatewayEventType {
     }
 }
 
-/// Gateway-specific domain events — what actually happened in our domain
-/// (e.g. `LightningInvoiceCreated`). `to_standardized()` maps each onto the
-/// 8-event vocabulary for the consumer-side stream.
+/// Gateway-specific domain events.
 ///
-/// Slice 1a only emits `LightningInvoiceCreated`. Other variants
-/// (`LightningInvoiceSettled`, `LightningPaymentInitiated`, etc.) land
-/// alongside their owning slices.
+/// `LightningInvoiceSettled` fires when LND tells us an incoming HTLC
+/// settled (`is_confirmed` on `subscribe_invoices`). Real production
+/// trigger lands in Story 2.3 — `App::handle_invoice_update` invokes
+/// `EventPublisher::publish_in_tx` from the subscription callback.
+///
+/// In Slice 1 the variant exists for pipeline coverage: integration
+/// tests insert a `LightningInvoiceSettled` outbox row directly via
+/// `EventPublisher::publish_in_tx` to demonstrate outbox → pg_notify
+/// → gRPC stream → consumer-side template firing end-to-end against
+/// the in-process Symphony stub + Cala mock. `App::create_invoice`
+/// does NOT emit this event — invoice creation isn't settlement.
+///
+/// Other variants (`LightningHtlcHeld`, `LightningInvoiceCanceled`,
+/// `LightningPaymentInitiated`, …) land alongside their owning
+/// stories (Story 2.3 onwards).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GatewayDomainEvent {
-    LightningInvoiceCreated,
+    LightningInvoiceSettled,
 }
 
 impl GatewayDomainEvent {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::LightningInvoiceCreated => "lightning_invoice_created",
+            Self::LightningInvoiceSettled => "lightning_invoice_settled",
         }
     }
 
-    /// Map to the standardized 8-event vocabulary. The choice for
-    /// `LightningInvoiceCreated` → `IncomingPaymentPending` reflects that
-    /// invoice creation registers an *intent* to receive a payment that has
-    /// not yet been confirmed; ADR #2 (Story 1.5) confirms or revises this.
+    /// Map to the standardized 8-event vocabulary.
     pub fn to_standardized(self) -> GatewayEventType {
         match self {
-            Self::LightningInvoiceCreated => GatewayEventType::IncomingPaymentPending,
+            Self::LightningInvoiceSettled => GatewayEventType::IncomingPaymentConfirmed,
         }
     }
 }
@@ -112,7 +139,7 @@ impl FromStr for GatewayDomainEvent {
     type Err = OutboxError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "lightning_invoice_created" => Ok(Self::LightningInvoiceCreated),
+            "lightning_invoice_settled" => Ok(Self::LightningInvoiceSettled),
             other => Err(OutboxError::UnknownEventType(other.to_owned())),
         }
     }
@@ -126,10 +153,51 @@ pub struct OutboxEvent {
     pub domain_event: GatewayDomainEvent,
     pub event_type: GatewayEventType,
     pub reference_id: String,
-    pub sat_amount: i64,
-    pub currency: String,
+    pub amount_sat: i64,
     pub timestamp: DateTime<Utc>,
     pub gateway_metadata: serde_json::Value,
+}
+
+impl OutboxEvent {
+    /// Project this row onto the wire-level `PaymentEvent` proto. Mirrors
+    /// `blink-card/src/outbox/entity.rs:28-61` (`to_proto`) — same shape so
+    /// Symphony's existing consumer-side `GatewayEventSource` decode path
+    /// works against this gateway too.
+    pub fn to_proto(&self) -> proto::PaymentEvent {
+        debug_assert!(self.sequence > 0, "Sequence must be positive");
+        debug_assert!(
+            self.amount_sat >= 0,
+            "amount_sat must be non-negative, got: {}",
+            self.amount_sat
+        );
+
+        // Defense in depth: a corrupt negative `amount_sat` is logged and
+        // clamped to 0. Casting a negative `i64` to `u64` would silently
+        // wrap to a near-`u64::MAX` value, which would propagate downstream.
+        let safe_amount_sat = if self.amount_sat >= 0 {
+            self.amount_sat as u64
+        } else {
+            ::tracing::error!(
+                sequence = self.sequence,
+                amount_sat = self.amount_sat,
+                "Negative amount_sat detected - clamping to 0"
+            );
+            0
+        };
+
+        proto::PaymentEvent {
+            sequence: self.sequence as u64,
+            correlation_id: self.correlation_id.clone(),
+            event_type: self.event_type.to_proto() as i32,
+            reference_id: self.reference_id.clone(),
+            amount: Some(proto::Amount {
+                value: Some(proto::amount::Value::Sats(safe_amount_sat)),
+            }),
+            timestamp_ms: self.timestamp.timestamp_millis(),
+            gateway_metadata: serde_json::to_string(&self.gateway_metadata)
+                .unwrap_or_else(|_| "{}".to_string()),
+        }
+    }
 }
 
 /// Caller-provided fields for a new outbox row. The publisher derives
@@ -140,29 +208,28 @@ pub struct NewOutboxEvent {
     pub correlation_id: String,
     pub domain_event: GatewayDomainEvent,
     pub reference_id: String,
-    pub sat_amount: i64,
-    pub currency: String,
+    pub amount_sat: i64,
     pub timestamp: DateTime<Utc>,
     pub gateway_metadata: serde_json::Value,
 }
 
 impl NewOutboxEvent {
-    /// Convenience constructor for the common Slice-1a case: a freshly
-    /// created LN invoice. Fills in `domain_event` and the BTC currency
-    /// default.
-    pub fn for_lightning_invoice_created(
+    /// Construct a `LightningInvoiceSettled` outbox row. Production
+    /// trigger (LND `subscribe_invoices` `is_confirmed` callback) lands
+    /// in Story 2.3; until then this constructor is exercised only by
+    /// integration tests that demonstrate the outbox → gRPC pipeline.
+    pub fn for_lightning_invoice_settled(
         correlation_id: impl Into<String>,
         payment_hash_hex: impl Into<String>,
-        sat_amount: i64,
+        amount_sat: i64,
         timestamp: DateTime<Utc>,
         gateway_metadata: serde_json::Value,
     ) -> Self {
         Self {
             correlation_id: correlation_id.into(),
-            domain_event: GatewayDomainEvent::LightningInvoiceCreated,
+            domain_event: GatewayDomainEvent::LightningInvoiceSettled,
             reference_id: payment_hash_hex.into(),
-            sat_amount,
-            currency: "BTC".to_owned(),
+            amount_sat,
             timestamp,
             gateway_metadata,
         }
@@ -174,27 +241,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn lightning_invoice_created_maps_to_incoming_pending() {
+    fn lightning_invoice_settled_maps_to_incoming_confirmed() {
         assert_eq!(
-            GatewayDomainEvent::LightningInvoiceCreated.to_standardized(),
-            GatewayEventType::IncomingPaymentPending
+            GatewayDomainEvent::LightningInvoiceSettled.to_standardized(),
+            GatewayEventType::IncomingPaymentConfirmed
         );
     }
 
     #[test]
     fn event_type_string_round_trip() {
-        let t = GatewayEventType::IncomingPaymentPending;
+        let t = GatewayEventType::IncomingPaymentConfirmed;
         let s = t.to_string();
-        assert_eq!(s, "INCOMING_PAYMENT_PENDING");
+        assert_eq!(s, "INCOMING_PAYMENT_CONFIRMED");
         let back: GatewayEventType = s.parse().unwrap();
         assert_eq!(back, t);
     }
 
     #[test]
     fn domain_event_string_round_trip() {
-        let d = GatewayDomainEvent::LightningInvoiceCreated;
+        let d = GatewayDomainEvent::LightningInvoiceSettled;
         let s = d.to_string();
-        assert_eq!(s, "lightning_invoice_created");
+        assert_eq!(s, "lightning_invoice_settled");
         let back: GatewayDomainEvent = s.parse().unwrap();
         assert_eq!(back, d);
     }

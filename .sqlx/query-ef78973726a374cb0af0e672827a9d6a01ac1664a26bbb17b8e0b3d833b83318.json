@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            SELECT\n                sequence,\n                correlation_id,\n                domain_event_type,\n                event_type,\n                reference_id,\n                sat_amount,\n                currency,\n                timestamp,\n                gateway_metadata\n            FROM outbox_events\n            WHERE sequence = $1\n            ",
+  "query": "\n            SELECT\n                sequence,\n                correlation_id,\n                domain_event_type,\n                event_type,\n                reference_id,\n                amount_sat,\n                timestamp,\n                gateway_metadata\n            FROM outbox_events\n            WHERE sequence > $1\n            ORDER BY sequence\n            LIMIT $2\n            ",
   "describe": {
     "columns": [
       {
@@ -30,27 +30,23 @@
       },
       {
         "ordinal": 5,
-        "name": "sat_amount",
+        "name": "amount_sat",
         "type_info": "Int8"
       },
       {
         "ordinal": 6,
-        "name": "currency",
-        "type_info": "Varchar"
-      },
-      {
-        "ordinal": 7,
         "name": "timestamp",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 8,
+        "ordinal": 7,
         "name": "gateway_metadata",
         "type_info": "Jsonb"
       }
     ],
     "parameters": {
       "Left": [
+        "Int8",
         "Int8"
       ]
     },
@@ -62,9 +58,8 @@
       false,
       false,
       false,
-      false,
       false
     ]
   },
-  "hash": "eeefa76b85c6cb55df2f8a55426a7ed827bf62787a750e1812c09ab00f06372b"
+  "hash": "ef78973726a374cb0af0e672827a9d6a01ac1664a26bbb17b8e0b3d833b83318"
 }

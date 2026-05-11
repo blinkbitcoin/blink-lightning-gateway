@@ -1,0 +1,59 @@
+syntax = "proto3";
+
+package lightning_payment_gateway;
+
+// Standardized payment event matching Symphony's GatewayEvent format.
+// Tag layout copied verbatim from blink-card/proto/card_payment_gateway.proto:24-46
+// so the cross-gateway shape stays identical and Symphony's consumer-side
+// trait can decode either gateway's stream with the same field accessors.
+message PaymentEvent {
+  uint64 sequence = 1;
+  string correlation_id = 2;
+  GatewayEventType event_type = 3;
+  string reference_id = 4;
+  Amount amount = 5;
+  int64 timestamp_ms = 6;
+  string gateway_metadata = 7;
+}
+
+// Amount with support for different currency types.
+message Amount {
+  oneof value {
+    uint64 sats = 1;
+    uint64 millisats = 2;
+    FiatAmount fiat = 3;
+  }
+}
+
+message FiatAmount {
+  uint64 cents = 1;
+  string currency = 2;
+}
+
+// Event Subscription request.
+message SubscribeEventsRequest {
+  // Resume from events after this sequence (0 = from beginning).
+  uint64 after_sequence = 1;
+}
+
+// Standardized 8-event vocabulary, identical tags to blink-card so the
+// shared Symphony consumer can decode a stream from either gateway.
+enum GatewayEventType {
+  GATEWAY_EVENT_TYPE_UNSPECIFIED = 0;
+  OUTGOING_PAYMENT_INITIATED = 1;
+  OUTGOING_PAYMENT_COMPLETED = 2;
+  OUTGOING_PAYMENT_FAILED = 3;
+  OUTGOING_PAYMENT_REVERSED = 4;
+  INCOMING_PAYMENT_RECEIVED = 5;
+  INCOMING_PAYMENT_PENDING = 6;
+  INCOMING_PAYMENT_CONFIRMED = 7;
+  INCOMING_PAYMENT_CANCELED = 8;
+}
+
+// Lightning Payment Gateway service. Slice 1 only exposes SubscribeEvents
+// (the consumer-facing surface for Symphony). Inbound operations
+// (lnInvoiceCreate, lnInvoicePaymentSend, etc.) ride the GraphQL subgraph,
+// not gRPC — see architecture.md L1016-1055.
+service LightningPaymentGateway {
+  rpc SubscribeEvents(SubscribeEventsRequest) returns (stream PaymentEvent);
+}

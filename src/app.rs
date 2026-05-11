@@ -20,8 +20,7 @@ pub use error::AppError;
 
 use crate::invoice::{Invoice, Invoices, NewInvoice};
 use crate::lnd::{AddInvoiceParams, LndApi};
-use crate::outbox::{EventPublisher, NewOutboxEvent};
-use crate::primitives::{BoltInvoice, MilliSatoshi, PaymentHash, Timestamp, WalletId};
+use crate::primitives::{MilliSatoshi, Timestamp, WalletId};
 
 /// Operating mode. `DryRun` short-circuits LND + DB writes — useful for
 /// FR2's eventual shadow-mode plumbing. Slice 1a only ever runs `Live`;
@@ -51,7 +50,6 @@ pub struct NewInvoiceRequest {
 #[derive(Clone)]
 pub struct App {
     invoices: Invoices,
-    outbox: EventPublisher,
     lnd: Arc<dyn LndApi>,
     pool: PgPool,
     mode: Mode,
@@ -61,7 +59,6 @@ impl App {
     pub fn new(pool: PgPool, lnd: Arc<dyn LndApi>) -> Self {
         Self {
             invoices: Invoices::new(&pool),
-            outbox: EventPublisher::new(&pool),
             lnd,
             pool,
             mode: Mode::Live,
@@ -82,8 +79,7 @@ impl App {
     ///   2. LND `add_invoice` (source of truth for `payment_hash` +
     ///      `bolt_invoice`).
     ///   3. Pure entity command `Invoice::create`.
-    ///   4. DB transaction wrapping the projection-row + events insert and
-    ///      the outbox publish atomically.
+    ///   4. DB transaction wrapping the projection-row + events insert.
     ///   5. Return the hydrated invoice.
     ///
     /// Order of (2) before (4) matches galoy's `addInvoiceForSelfForBtcWallet`
@@ -91,6 +87,12 @@ impl App {
     /// Failure mode "LND succeeds, DB fails" leaves an orphan invoice in
     /// LND with no DB record.
     /// KNOWN-ISSUE(story-4.3): orphan-invoice sweep job lands in chaos tests.
+    ///
+    /// No outbox event fires on creation — blink-core doesn't broadcast
+    /// invoice-creation either. The outbox row + standardized event for
+    /// incoming-payment lifecycle land in Story 2.3 (the LND
+    /// `subscribe_invoices` adapter + handler), keyed off real wire
+    /// events (`is_held`, `is_confirmed`, `is_canceled`).
     pub async fn create_invoice(&self, request: NewInvoiceRequest) -> Result<Invoice, AppError> {
         let now = Timestamp::now();
 
@@ -121,7 +123,7 @@ impl App {
             request.wallet_id,
             request.amount_msat,
             request.expiry_seconds,
-            lnd_resp.bolt_invoice.clone(),
+            lnd_resp.bolt_invoice,
             now,
         )?;
 
@@ -134,23 +136,15 @@ impl App {
             ));
         }
 
-        // 4. Atomic projection-row + event-rows + outbox-row insert in one
-        // transaction. `create_in_op` returns the hydrated `Invoice`; no
-        // separate find_by_payment_hash round-trip needed.
+        // 4. Atomic projection-row + event-rows insert in one transaction.
+        // `create_in_op` returns the hydrated `Invoice`; no separate
+        // find_by_payment_hash round-trip needed.
         let mut tx = self.pool.begin().await?;
         let invoice = self
             .invoices
             .create_in_op(&mut tx, new_invoice)
             .await
             .map_err(crate::invoice::InvoiceError::from)?;
-
-        let outbox_event = build_invoice_created_outbox_event(
-            &lnd_resp.payment_hash,
-            request.amount_msat,
-            now,
-            &lnd_resp.bolt_invoice,
-        )?;
-        self.outbox.publish_in_tx(&mut tx, outbox_event).await?;
         tx.commit().await?;
 
         Ok(invoice)
@@ -160,37 +154,5 @@ impl App {
     /// cache (architecture's recommended path per L109).
     async fn check_wallet_ownership(&self, _wallet_id: &WalletId) -> Result<(), AppError> {
         Ok(())
-    }
-}
-
-fn build_invoice_created_outbox_event(
-    payment_hash: &PaymentHash,
-    amount_msat: MilliSatoshi,
-    now: Timestamp,
-    bolt_invoice: &BoltInvoice,
-) -> Result<NewOutboxEvent, AppError> {
-    let metadata = serde_json::json!({
-        "bolt_invoice": bolt_invoice.as_str(),
-        "payment_hash": payment_hash.to_hex(),
-    });
-    let sat_amount: i64 = (amount_msat.as_u64() / 1000)
-        .try_into()
-        .map_err(|_| AppError::WalletOwnership("amount too large".to_owned()))?;
-    Ok(NewOutboxEvent::for_lightning_invoice_created(
-        InvoiceEventCorrelation::for_request(payment_hash).0,
-        payment_hash.to_hex(),
-        sat_amount,
-        now.into_inner(),
-        metadata,
-    ))
-}
-
-// Internal helper that's nominally just the correlation_id stringification;
-// kept here so the App's outbox event always has a deterministic
-// payment_hash-keyed correlation that downstream Symphony can match against.
-struct InvoiceEventCorrelation(String);
-impl InvoiceEventCorrelation {
-    fn for_request(payment_hash: &PaymentHash) -> Self {
-        Self(payment_hash.to_hex())
     }
 }

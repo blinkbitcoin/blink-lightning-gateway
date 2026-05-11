@@ -4,27 +4,12 @@
 //! doesn't need its own DB-bound test here.
 
 use serial_test::serial;
-use sqlx::postgres::PgPoolOptions;
-use sqlx::{Pool, Postgres};
-use testcontainers::runners::AsyncRunner;
-use testcontainers_modules::postgres::Postgres as PgImage;
 
 use blink_ln_gateway::invoice::entity::NewInvoice;
 use blink_ln_gateway::invoice::Invoices;
 use blink_ln_gateway::primitives::{BoltInvoice, MilliSatoshi, PaymentHash, Timestamp, WalletId};
 
-async fn boot_pg() -> (testcontainers::ContainerAsync<PgImage>, Pool<Postgres>) {
-    let container = PgImage::default().start().await.expect("start pg");
-    let port = container.get_host_port_ipv4(5432).await.expect("port");
-    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
-    let pool = PgPoolOptions::new()
-        .max_connections(4)
-        .connect(&url)
-        .await
-        .expect("connect pg");
-    sqlx::migrate!().run(&pool).await.expect("migrate");
-    (container, pool)
-}
+use crate::common::TestDatabase;
 
 fn ok_new_invoice() -> NewInvoice {
     NewInvoice::try_new(
@@ -41,7 +26,8 @@ fn ok_new_invoice() -> NewInvoice {
 #[tokio::test]
 #[serial]
 async fn create_then_find_by_payment_hash() {
-    let (_pg, pool) = boot_pg().await;
+    let db = TestDatabase::new().await.expect("test db");
+    let pool = db.pool.clone();
     let invoices = Invoices::new(&pool);
 
     let new = ok_new_invoice();
@@ -60,7 +46,8 @@ async fn create_then_find_by_payment_hash() {
 #[tokio::test]
 #[serial]
 async fn maybe_find_by_payment_hash_missing_returns_none() {
-    let (_pg, pool) = boot_pg().await;
+    let db = TestDatabase::new().await.expect("test db");
+    let pool = db.pool.clone();
     let invoices = Invoices::new(&pool);
     let res = invoices
         .maybe_find_by_payment_hash(&PaymentHash::from([0xff; 32]))
@@ -72,7 +59,8 @@ async fn maybe_find_by_payment_hash_missing_returns_none() {
 #[tokio::test]
 #[serial]
 async fn create_writes_one_invoices_row_and_one_event_row() {
-    let (_pg, pool) = boot_pg().await;
+    let db = TestDatabase::new().await.expect("test db");
+    let pool = db.pool.clone();
     let invoices = Invoices::new(&pool);
     let _ = invoices.create(ok_new_invoice()).await.expect("create");
 
