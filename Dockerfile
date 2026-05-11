@@ -15,9 +15,9 @@ ENV SQLX_OFFLINE=true
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     cargo build --locked --release && \
-    find target -name "blink-ln-gateway" -type f -executable && \
-    cp $(find target -name "blink-ln-gateway" -type f -executable | head -1) /tmp/blink-ln-gateway
+    find target -name "blink-lightning-gateway" -type f -executable && \
+    cp $(find target -name "blink-lightning-gateway" -type f -executable | head -1) /tmp/blink-lightning-gateway
 FROM ubuntu:24.04
-COPY --from=build /tmp/blink-ln-gateway /usr/local/bin/blink-ln-gateway
+COPY --from=build /tmp/blink-lightning-gateway /usr/local/bin/blink-lightning-gateway
 USER 1000
-CMD ["blink-ln-gateway"]
+CMD ["blink-lightning-gateway"]

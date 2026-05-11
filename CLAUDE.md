@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-`blink-ln-gateway` is a native Rust Lightning payment gateway for the Blink platform. Currently in dev/prototyp phase, no production traffic. All architecture / epic / story decisions live under `_bmad-output/`.
+`blink-lightning-gateway` is a native Rust Lightning payment gateway for the Blink platform. Currently in dev/prototyp phase, no production traffic. All architecture / epic / story decisions live under `_bmad-output/`.
 
 ## Common commands
 

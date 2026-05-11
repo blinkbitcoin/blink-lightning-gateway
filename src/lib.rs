@@ -1,4 +1,4 @@
-//! blink-ln-gateway library crate.
+//! blink-lightning-gateway library crate.
 //!
 //! Bria-style flat per-bounded-context layout. See ADR #1 (filed by Story 1.3
 //! at `_bmad-output/decisions/0001-ddd-bria-pattern-fidelity.md`) for the full

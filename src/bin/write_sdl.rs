@@ -13,9 +13,9 @@ use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use blink_ln_gateway::api::graphql::build_schema;
-use blink_ln_gateway::app::App;
-use blink_ln_gateway::lnd::{AddInvoiceParams, AddInvoiceResponse, LndApi, LndError};
+use blink_lightning_gateway::api::graphql::build_schema;
+use blink_lightning_gateway::app::App;
+use blink_lightning_gateway::lnd::{AddInvoiceParams, AddInvoiceResponse, LndApi, LndError};
 
 struct StubLnd;
 

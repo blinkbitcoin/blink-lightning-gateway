@@ -10,20 +10,20 @@
 # does NOT use sqlxmq, so PG17 here is safe; the test image lag is
 # functionally invisible.
 
-name: blink-ln-gateway-dev
+name: blink-lightning-gateway-dev
 
 services:
   postgres:
     image: postgres:17-alpine
-    container_name: blink-ln-gateway-pg
+    container_name: blink-lightning-gateway-pg
     environment:
-      POSTGRES_DB: blink_ln_gateway
+      POSTGRES_DB: blink_lightning_gateway
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
     ports:
       - "5432:5432"
     volumes:
-      - blink-ln-gateway-pg-data:/var/lib/postgresql/data
+      - blink-lightning-gateway-pg-data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 1s
@@ -31,4 +31,4 @@ services:
       retries: 30
 
 volumes:
-  blink-ln-gateway-pg-data:
+  blink-lightning-gateway-pg-data:

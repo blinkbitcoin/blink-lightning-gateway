@@ -18,13 +18,13 @@ use serial_test::serial;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::{Channel, Server};
 
-use blink_ln_gateway::api::grpc::LightningPaymentGatewayService;
-use blink_ln_gateway::lightning_payment_gateway::{
+use blink_lightning_gateway::api::grpc::LightningPaymentGatewayService;
+use blink_lightning_gateway::lightning_payment_gateway::{
     amount as proto_amount, lightning_payment_gateway_client::LightningPaymentGatewayClient,
     lightning_payment_gateway_server::LightningPaymentGatewayServer, GatewayEventType,
     SubscribeEventsRequest,
 };
-use blink_ln_gateway::outbox::{EventPublisher, NewOutboxEvent};
+use blink_lightning_gateway::outbox::{EventPublisher, NewOutboxEvent};
 
 use crate::common::TestDatabase;
 
@@ -58,7 +58,7 @@ impl CalaMock {
 /// template-selection shape without depending on the not-yet-merged PR
 /// (per Story 1.5 AC7).
 async fn run_symphony_stub(
-    mut stream: tonic::Streaming<blink_ln_gateway::lightning_payment_gateway::PaymentEvent>,
+    mut stream: tonic::Streaming<blink_lightning_gateway::lightning_payment_gateway::PaymentEvent>,
     cala: CalaMock,
     expected: usize,
 ) {

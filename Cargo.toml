@@ -1,5 +1,5 @@
 [package]
-name = "blink-ln-gateway"
+name = "blink-lightning-gateway"
 version = "0.1.0"
 edition = "2021"
 

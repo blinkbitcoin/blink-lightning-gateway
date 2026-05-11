@@ -16,10 +16,10 @@ use async_trait::async_trait;
 use serde_json::json;
 use serial_test::serial;
 
-use blink_ln_gateway::api::graphql::{build_schema, GatewaySchema};
-use blink_ln_gateway::app::App;
-use blink_ln_gateway::lnd::{AddInvoiceParams, AddInvoiceResponse, LndApi, LndError};
-use blink_ln_gateway::primitives::{BoltInvoice, PaymentHash};
+use blink_lightning_gateway::api::graphql::{build_schema, GatewaySchema};
+use blink_lightning_gateway::app::App;
+use blink_lightning_gateway::lnd::{AddInvoiceParams, AddInvoiceResponse, LndApi, LndError};
+use blink_lightning_gateway::primitives::{BoltInvoice, PaymentHash};
 
 use crate::common::TestDatabase;
 

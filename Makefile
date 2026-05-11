@@ -5,11 +5,11 @@
 
 # DATABASE_URL targets the dev/docker-compose.yml Postgres. All recipes that
 # touch sqlx use it; production deployments override at runtime.
-DATABASE_URL ?= postgres://postgres:postgres@localhost:5432/blink_ln_gateway
+DATABASE_URL ?= postgres://postgres:postgres@localhost:5432/blink_lightning_gateway
 export DATABASE_URL
 
 build:
-	@echo "Building blink-ln-gateway..."
+	@echo "Building blink-lightning-gateway..."
 	SQLX_OFFLINE=true cargo build --release
 
 test:

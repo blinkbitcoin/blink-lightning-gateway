@@ -1,4 +1,4 @@
-# blink-ln-gateway
+# blink-lightning-gateway
 
 Native Rust Lightning payment gateway for the Blink platform. 
 

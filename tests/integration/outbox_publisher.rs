@@ -11,7 +11,7 @@ use std::time::Duration;
 use chrono::Utc;
 use serial_test::serial;
 
-use blink_ln_gateway::outbox::{
+use blink_lightning_gateway::outbox::{
     EventPublisher, GatewayDomainEvent, GatewayEventType, NewOutboxEvent,
 };
 

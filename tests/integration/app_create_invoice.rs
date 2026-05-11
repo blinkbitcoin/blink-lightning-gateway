@@ -7,9 +7,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serial_test::serial;
 
-use blink_ln_gateway::app::{App, AppError, NewInvoiceRequest};
-use blink_ln_gateway::lnd::{AddInvoiceParams, AddInvoiceResponse, LndApi, LndError};
-use blink_ln_gateway::primitives::{BoltInvoice, MilliSatoshi, PaymentHash, WalletId};
+use blink_lightning_gateway::app::{App, AppError, NewInvoiceRequest};
+use blink_lightning_gateway::lnd::{AddInvoiceParams, AddInvoiceResponse, LndApi, LndError};
+use blink_lightning_gateway::primitives::{BoltInvoice, MilliSatoshi, PaymentHash, WalletId};
 
 use crate::common::TestDatabase;
 

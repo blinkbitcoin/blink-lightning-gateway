@@ -5,9 +5,9 @@
 
 use serial_test::serial;
 
-use blink_ln_gateway::invoice::entity::NewInvoice;
-use blink_ln_gateway::invoice::Invoices;
-use blink_ln_gateway::primitives::{BoltInvoice, MilliSatoshi, PaymentHash, Timestamp, WalletId};
+use blink_lightning_gateway::invoice::entity::NewInvoice;
+use blink_lightning_gateway::invoice::Invoices;
+use blink_lightning_gateway::primitives::{BoltInvoice, MilliSatoshi, PaymentHash, Timestamp, WalletId};
 
 use crate::common::TestDatabase;
 
