@@ -1,0 +1,18 @@
+db:
+  pool_size: 20
+
+grpc:
+  port: 6700
+  reflection_enabled: true
+
+health:
+  port: 8081
+
+# Symphony's lightning gateway client points at the gateway running on
+# the host (`cargo run` from the dev shell, not in a container).
+lightning_gateway:
+  grpc_endpoint: "http://host.docker.internal:6690"
+  enabled: true
+
+tracing:
+  service_name: "symphony-ln-gateway-dev"

@@ -5,7 +5,7 @@
 
 # DATABASE_URL targets the dev/docker-compose.yml Postgres. All recipes that
 # touch sqlx use it; production deployments override at runtime.
-DATABASE_URL ?= postgres://postgres:postgres@localhost:5432/blink_lightning_gateway
+DATABASE_URL ?= postgres://postgres:postgres@localhost:5435/blink_lightning_gateway
 export DATABASE_URL
 
 build:
@@ -78,7 +78,6 @@ integration-test:
 	@echo "Running integration tests..."
 	SQLX_OFFLINE=true cargo test --test integration
 
-# E2E test environment targets (orchestrated by Tilt) — wire in Story 1.6
 e2e-up:
 	tilt up
 
@@ -86,4 +85,4 @@ e2e-down:
 	tilt down
 
 e2e-test:
-	@echo "TODO(story 1.6): wire e2e/run-tests.sh once stack exists"
+	@echo "TODO(story 5.3): wire dev/run-tests.sh once stack exists"

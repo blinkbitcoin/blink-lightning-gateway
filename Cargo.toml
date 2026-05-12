@@ -28,6 +28,11 @@ uuid = { version = "1", features = ["v4", "v7", "serde"] }
 hex = "0.4"
 async-graphql = { version = "7.0", features = ["dataloader"] }
 async-graphql-axum = "7.0"
+clap = { version = "4", features = ["derive", "env"] }
+serde_yaml = "0.9"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+tonic-health = "0.14"
+anyhow = "1"
 
 [build-dependencies]
 tonic-prost-build = "0.14"
@@ -35,5 +40,4 @@ tonic-prost-build = "0.14"
 [dev-dependencies]
 testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["postgres"] }
-anyhow = "1"
 mockall = "0.13"

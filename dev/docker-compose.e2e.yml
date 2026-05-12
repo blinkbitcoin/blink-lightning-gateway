@@ -1,0 +1,74 @@
+# End-to-end overlay for the local dev stack.
+#
+# Tilt merges this on top of `vendor/blink-quickstart/docker-compose.yml`
+# (the upstream Blink dev stack) plus `dev/docker-compose.yml` (the
+# gateway's own dev Postgres). This file holds only the services that
+# blink-quickstart does NOT include but the gateway's smoke flow needs:
+#   - Symphony + Symphony-pg (the dev consumer side of the gRPC stream)
+#   - apollo-router volume override pointing at the gateway-generated
+#     supergraph
+#
+# Modelled on `blink-card/docker-compose.e2e.yml:1-67`, adapted to the
+# gateway:
+#   - `LIGHTNING_GW_GRPC_ENDPOINT` (not `BLINK_CARD_GRPC_ENDPOINT`) points
+#     Symphony's lightning gateway client at the host (gateway runs via
+#     `cargo run`, not in a container).
+#   - The gateway-pg compose lives in `dev/docker-compose.yml` already;
+#     Tilt imports both files via `docker_compose([...])`.
+
+services:
+  apollo-router:
+    # Paths are resolved relative to the docker-compose PROJECT DIRECTORY
+    # (the first `-f` file's parent, i.e. `vendor/blink-quickstart/`),
+    # NOT this file's directory. `../../dev/...` climbs from
+    # `vendor/blink-quickstart/` up to the repo root and back into
+    # `dev/`. Matches the `../../e2e/...` pattern blink-card uses in its
+    # own `docker-compose.e2e.yml`.
+    volumes:
+      - ../../dev/config/apollo-federation:/repo/dev
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  symphony:
+    image: us.gcr.io/galoy-org/symphony:latest
+    ports:
+      - "6700:6700"
+      - "8081:8081"
+    environment:
+      - PG_CON=postgres://user:password@symphony-pg:5432/pg
+      - LIGHTNING_GW_GRPC_ENDPOINT=http://host.docker.internal:6690
+      - SYMPHONY_CONFIG=/config/symphony.yml
+    volumes:
+      - ../../dev/symphony-dev.yml:/config/symphony.yml
+    depends_on:
+      symphony-migrate:
+        condition: service_completed_successfully
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: on-failure:5
+
+  symphony-migrate:
+    image: us.gcr.io/galoy-org/symphony:latest
+    environment:
+      - PG_CON=postgres://user:password@symphony-pg:5432/pg
+      - SYMPHONY_CONFIG=/config/symphony.yml
+    volumes:
+      - ../../dev/symphony-dev.yml:/config/symphony.yml
+    depends_on:
+      symphony-pg:
+        condition: service_healthy
+    command: ["symphony", "migrate"]
+
+  symphony-pg:
+    image: postgres:16.4
+    ports:
+      - "5430:5432"
+    environment:
+      - POSTGRES_USER=user
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=pg
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d pg"]
+      interval: 5s
+      timeout: 5s
+      retries: 5

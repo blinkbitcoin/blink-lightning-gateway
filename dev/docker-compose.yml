@@ -21,7 +21,12 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
     ports:
-      - "5432:5432"
+      # Host port 5435: kratos-pg already binds 5432 in
+      # vendor/blink-quickstart/docker-compose.yml; symphony-pg (5430),
+      # api-keys-pg (5431), notifications-pg (5433) take the slots in
+      # between. 5435 is the first free port. Update DATABASE_URL /
+      # PG_CON / `.env.example` if you change this.
+      - "5435:5432"
     volumes:
       - blink-lightning-gateway-pg-data:/var/lib/postgresql/data
     healthcheck:

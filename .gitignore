@@ -11,3 +11,9 @@ _bmad
 .claude
 _bmad-output
 CLAUDE.local.md
+
+# Generated supergraph files (created by dev/generate-supergraph.sh
+# during `tilt up`; mirrors blink-card's gitignore).
+dev/config/apollo-federation/supergraph.graphql
+dev/config/apollo-federation/supergraph-config.yaml
+dev/config/apollo-federation/router.yaml

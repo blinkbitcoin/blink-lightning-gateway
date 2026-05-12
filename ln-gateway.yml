@@ -1,0 +1,46 @@
+# blink-lightning-gateway default config.
+#
+# The binary reads this file at boot (override the path with
+# `--config / -c` or `BLINK_LIGHTNING_GATEWAY_CONFIG`). Every block is
+# optional — `Config::from_path` uses `#[serde(default)]` on every field,
+# so a partial YAML still produces a valid `Config`. Database connection
+# info comes from `PG_CON` (env) or `--pg-con` (CLI); it is never written
+# into this file.
+
+# Database. Pool size only; `pg_con` is supplied via env or CLI.
+db:
+  pool_size: 20
+
+# GraphQL subgraph server (federation v2).
+subgraph_server:
+  port: 6691
+  jwks_url: "http://localhost:4456/.well-known/jwks.json"
+
+# gRPC server hosting `LightningPaymentGateway/SubscribeEvents` and the
+# `grpc.health.v1.Health` service. `shutdown_grace_secs` is the window
+# between flipping the gRPC health to `NotServing` and cancelling the
+# shutdown token; gives kube a chance to remove the pod from the gRPC LB
+# endpoints before this pod refuses connections.
+grpc_server:
+  port: 6690
+  keepalive_interval_secs: 30
+  keepalive_timeout_secs: 10
+  shutdown_grace_secs: 5
+
+# HTTP health probe server. Kubernetes liveness / readiness use these.
+health_server:
+  port: 8080
+
+# Symphony adapter. First inhabitant lands with Story 2.2's
+# `authorize_spend`-equivalent; the block stays here so the YAML
+# template doesn't need to change when that story arrives.
+symphony: {}
+
+# OpenTelemetry exporter (optional). With this block commented out the
+# binary falls back to a JSON-formatted `tracing-subscriber` on stdout.
+# The OTLP exporter wiring itself is stubbed today — a later Epic 2
+# story replaces the stub in `src/tracing.rs::init_tracer` with a real
+# `opentelemetry-otlp` exporter.
+# tracing:
+#   exporter_otlp_url: "http://localhost:4317"
+#   service_name: "blink-lightning-gateway-dev"
