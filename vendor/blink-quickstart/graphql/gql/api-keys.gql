@@ -1,0 +1,26 @@
+query apiKeys {
+  me {
+    defaultAccount {
+      id
+    }
+    apiKeys {
+      id
+      name
+      revoked
+      createdAt
+      expiresAt
+      readOnly
+      scopes
+      limits {
+        dailyLimitSats
+        weeklyLimitSats
+        monthlyLimitSats
+        annualLimitSats
+        dailySpentSats
+        weeklySpentSats
+        monthlySpentSats
+        annualSpentSats
+      }
+    }
+  }
+}

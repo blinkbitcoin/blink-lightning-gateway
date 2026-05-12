@@ -1,0 +1,26 @@
+mutation lnNoAmountInvoicePaymentSend($input: LnNoAmountInvoicePaymentInput!) {
+  lnNoAmountInvoicePaymentSend(input: $input) {
+    errors {
+      code
+      message
+    }
+    status
+    transaction {
+      externalId
+      initiationVia {
+        ... on InitiationViaLn {
+          paymentHash
+          paymentRequest
+        }
+      }
+      settlementVia {
+        ... on SettlementViaIntraLedger {
+          preImage
+        }
+        ... on SettlementViaLn {
+          preImage
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,97 @@
+type ApiKey {
+	id: ID!
+	name: String!
+	createdAt: Timestamp!
+	revoked: Boolean!
+	expired: Boolean!
+	lastUsedAt: Timestamp
+	expiresAt: Timestamp
+	readOnly: Boolean!
+	scopes: [Scope!]!
+	limits: ApiKeyLimits!
+}
+
+input ApiKeyCreateInput {
+	name: String!
+	expireInDays: Int
+	scopes: [Scope!]! = [READ, WRITE]
+}
+
+type ApiKeyCreatePayload {
+	apiKey: ApiKey!
+	apiKeySecret: String!
+}
+
+type ApiKeyLimits {
+	dailyLimitSats: Int
+	weeklyLimitSats: Int
+	monthlyLimitSats: Int
+	annualLimitSats: Int
+	dailySpentSats: Int!
+	weeklySpentSats: Int!
+	monthlySpentSats: Int!
+	annualSpentSats: Int!
+}
+
+input ApiKeyRemoveLimitInput {
+	id: ID!
+	limitTimeWindow: LimitTimeWindow!
+}
+
+input ApiKeyRevokeInput {
+	id: ID!
+}
+
+type ApiKeyRevokePayload {
+	apiKey: ApiKey!
+}
+
+input ApiKeySetLimitInput {
+	id: ID!
+	limitTimeWindow: LimitTimeWindow!
+	limitSats: Int!
+}
+
+type ApiKeySetLimitPayload {
+	apiKey: ApiKey!
+}
+
+
+
+
+
+enum LimitTimeWindow {
+	DAILY
+	WEEKLY
+	MONTHLY
+	ANNUAL
+}
+
+type Mutation {
+	apiKeyCreate(input: ApiKeyCreateInput!): ApiKeyCreatePayload!
+	apiKeyRevoke(input: ApiKeyRevokeInput!): ApiKeyRevokePayload!
+	apiKeySetLimit(input: ApiKeySetLimitInput!): ApiKeySetLimitPayload!
+	apiKeyRemoveLimit(input: ApiKeyRemoveLimitInput!): ApiKeySetLimitPayload!
+}
+
+
+enum Scope {
+	READ
+	WRITE
+	RECEIVE
+}
+
+
+scalar Timestamp
+
+extend type User @key(fields: "id") {
+	id: ID! @external
+	apiKeys: [ApiKey!]!
+}
+
+directive @include(if: Boolean!) on FIELD | FRAGMENT_SPREAD | INLINE_FRAGMENT
+directive @skip(if: Boolean!) on FIELD | FRAGMENT_SPREAD | INLINE_FRAGMENT
+extend schema @link(
+	url: "https://specs.apollo.dev/federation/v2.3",
+	import: ["@key", "@tag", "@shareable", "@inaccessible", "@override", "@external", "@provides", "@requires", "@composeDirective", "@interfaceObject"]
+)

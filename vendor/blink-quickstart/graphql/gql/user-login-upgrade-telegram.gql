@@ -1,0 +1,10 @@
+mutation userLoginUpgradeTelegram($input: UserLoginUpgradeTelegramInput!) {
+  userLoginUpgradeTelegram(input: $input) {
+    success
+    authToken
+    errors {
+      code
+      message
+    }
+  }
+}

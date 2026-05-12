@@ -1,0 +1,25 @@
+apiVersion: vendir.k14s.io/v1alpha1
+kind: Config
+
+directories:
+- path: vendor
+  contents:
+  - path: blink-quickstart
+    git:
+      url: git@github.com:blinkbitcoin/blink.git
+      ref: main
+    includePaths:
+    - quickstart/docker-compose.yml
+    - quickstart/dev/**/*
+    - quickstart/bin/**/*
+    - quickstart/graphql/**/*
+    - quickstart/.gitignore
+    newRootPath: quickstart
+  - path: blink-core-schemas
+    git:
+      url: git@github.com:blinkbitcoin/blink.git
+      ref: main
+    includePaths:
+    - core/api/src/graphql/public/schema.graphql
+    - core/api-keys/subgraph/schema.graphql
+    - core/notifications/subgraph/schema.graphql
