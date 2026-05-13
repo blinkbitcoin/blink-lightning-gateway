@@ -66,8 +66,24 @@ enum Commands {
     Migrate,
 }
 
+fn report_exit(send: &tokio::sync::mpsc::Sender<anyhow::Result<()>>, result: anyhow::Result<()>) {
+    use tokio::sync::mpsc::error::TrySendError;
+    match send.try_send(result) {
+        Ok(()) => {}
+        Err(TrySendError::Full(dropped)) => warn!(
+            dropped = ?dropped,
+            "supervisor channel full; dropped exit reason"
+        ),
+        Err(TrySendError::Closed(_)) => {}
+    }
+}
+
 pub async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
+
+    if cli.pg_con.trim().is_empty() {
+        anyhow::bail!("PG_CON / --pg-con must not be empty");
+    }
 
     let config = Config::from_path(
         &cli.config,
@@ -141,7 +157,7 @@ async fn run_cmd(config: Config) -> anyhow::Result<()> {
                 .await
                 .map_err(anyhow::Error::from)
                 .context("gRPC server error");
-            let _ = send.try_send(result);
+            report_exit(&send, result);
         }));
     }
 
@@ -157,7 +173,7 @@ async fn run_cmd(config: Config) -> anyhow::Result<()> {
                 .await
                 .map_err(anyhow::Error::from)
                 .context("GraphQL subgraph server error");
-            let _ = send.try_send(result);
+            report_exit(&send, result);
         }));
     }
 
@@ -173,7 +189,7 @@ async fn run_cmd(config: Config) -> anyhow::Result<()> {
                 .await
                 .map_err(anyhow::Error::from)
                 .context("HTTP health server error");
-            let _ = send.try_send(result);
+            report_exit(&send, result);
         }));
     }
 
@@ -188,53 +204,76 @@ async fn run_cmd(config: Config) -> anyhow::Result<()> {
         let reporter = health_reporter.clone();
         let grace = Duration::from_secs(config.grpc_server.shutdown_grace_secs);
         handles.push(tokio::spawn(async move {
-            wait_for_shutdown_signal().await;
-            info!("Shutdown signal received; flipping gRPC health to NotServing");
-            reporter
-                .set_not_serving::<LightningPaymentGatewayServer<LightningPaymentGatewayService>>()
-                .await;
-            info!(
-                grace_secs = grace.as_secs(),
-                "Draining: sleeping grace window before cancelling token"
-            );
-            tokio::time::sleep(grace).await;
-            info!("Grace window elapsed; cancelling shutdown token");
-            cancel.cancel();
-            let _ = send.try_send(Ok(()));
+            let result: anyhow::Result<()> = async {
+                wait_for_shutdown_signal()
+                    .await
+                    .context("install shutdown signal handler")?;
+                info!("Shutdown signal received; flipping gRPC health to NotServing");
+                reporter
+                    .set_not_serving::<LightningPaymentGatewayServer<LightningPaymentGatewayService>>()
+                    .await;
+                info!(
+                    grace_secs = grace.as_secs(),
+                    "Draining: sleeping grace window before cancelling token"
+                );
+                tokio::time::sleep(grace).await;
+                info!("Grace window elapsed; cancelling shutdown token");
+                cancel.cancel();
+                Ok(())
+            }
+            .await;
+            report_exit(&send, result);
         }));
     }
     drop(send);
 
     // Supervisor: the first task to post an exit reason wins. After
     // capturing the reason, cancel the token (a no-op if the signal
-    // handler already cancelled) and abort the remaining handles.
-    let reason = receive
-        .recv()
-        .await
-        .expect("supervisor channel closed without a message");
+    // handler already cancelled) and let the remaining tasks drain
+    // within `drain_deadline`. Abort only if a task does not exit
+    // within that window — `handle.abort()` short-circuits tonic's
+    // and axum's graceful-shutdown drain.
+    let reason = match receive.recv().await {
+        Some(r) => r,
+        None => anyhow::bail!("all server tasks exited without reporting status"),
+    };
     cancel.cancel();
-    for handle in handles {
-        handle.abort();
+    let drain_deadline =
+        Duration::from_secs(config.grpc_server.shutdown_grace_secs) + Duration::from_secs(5);
+    for mut handle in handles {
+        let abort = handle.abort_handle();
+        if tokio::time::timeout(drain_deadline, &mut handle)
+            .await
+            .is_err()
+        {
+            warn!(
+                deadline_secs = drain_deadline.as_secs(),
+                "server task did not drain within deadline; aborting"
+            );
+            abort.abort();
+        }
     }
     reason
 }
 
-async fn wait_for_shutdown_signal() {
+async fn wait_for_shutdown_signal() -> anyhow::Result<()> {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
-        let mut sigterm = signal(SignalKind::terminate()).expect("install SIGTERM handler");
-        let mut sigint = signal(SignalKind::interrupt()).expect("install SIGINT handler");
+        let mut sigterm = signal(SignalKind::terminate()).context("install SIGTERM handler")?;
+        let mut sigint = signal(SignalKind::interrupt()).context("install SIGINT handler")?;
         tokio::select! {
             _ = sigterm.recv() => info!("SIGTERM received"),
             _ = sigint.recv() => info!("SIGINT received"),
         }
+        Ok(())
     }
     #[cfg(not(unix))]
     {
         tokio::signal::ctrl_c()
             .await
-            .expect("install ctrl_c handler");
+            .context("install ctrl_c handler")?;
         info!("ctrl_c received");
+        Ok(())
     }
 }

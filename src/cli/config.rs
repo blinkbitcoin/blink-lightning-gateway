@@ -38,8 +38,11 @@ impl Config {
         EnvOverride { pg_con }: EnvOverride,
     ) -> anyhow::Result<Self> {
         let body = std::fs::read_to_string(path).context("Couldn't read config file")?;
-        let mut config: Config =
-            serde_yaml::from_str(&body).context("Couldn't parse config file")?;
+        let mut config: Config = if body.trim().is_empty() {
+            Config::default()
+        } else {
+            serde_yaml::from_str(&body).context("Couldn't parse config file")?
+        };
         config.db.pg_con = pg_con;
         Ok(config)
     }

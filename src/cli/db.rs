@@ -4,7 +4,10 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DbConfig {
-    #[serde(default)]
+    /// Postgres connection string. Always env-overridden via `PG_CON` /
+    /// `--pg-con`; never read from YAML. `#[serde(skip)]` keeps it out
+    /// of the YAML schema and out of `Config::default()` round-trips.
+    #[serde(skip)]
     pub pg_con: String,
     #[serde(default = "default_pool_size")]
     pub pool_size: u32,
