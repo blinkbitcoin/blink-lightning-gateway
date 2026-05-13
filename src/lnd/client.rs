@@ -55,6 +55,15 @@ impl LndClient {
         let _ = config;
         Err(LndError::Stub)
     }
+
+    /// Construct an `LndClient` without attempting to connect. Used by
+    /// the binary entrypoint (`src/cli.rs::run_cmd`) so the gateway can
+    /// boot the gRPC + GraphQL + health surfaces without a working LND
+    /// upstream. Every `LndApi` call returns `LndError::Stub` until
+    /// Story 2.2 wires the real tonic-channel connection.
+    pub fn boot_stub(config: LndConfig) -> Self {
+        Self { config }
+    }
 }
 
 #[async_trait]

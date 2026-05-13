@@ -3,10 +3,11 @@
 //! `src/invoice/entity.rs` (`try_new_rejects_zero_amount`), so it
 //! doesn't need its own DB-bound test here.
 
-
 use blink_lightning_gateway::invoice::entity::NewInvoice;
 use blink_lightning_gateway::invoice::Invoices;
-use blink_lightning_gateway::primitives::{BoltInvoice, MilliSatoshi, PaymentHash, Timestamp, WalletId};
+use blink_lightning_gateway::primitives::{
+    BoltInvoice, MilliSatoshi, PaymentHash, Timestamp, WalletId,
+};
 
 use crate::common::TestDatabase;
 

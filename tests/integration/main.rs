@@ -9,3 +9,4 @@ mod invoice_consumer_flow;
 mod invoice_create_producer_flow;
 mod invoice_repo;
 mod outbox_publisher;
+mod server_lifecycle;
