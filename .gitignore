@@ -17,3 +17,8 @@ CLAUDE.local.md
 dev/config/apollo-federation/supergraph.graphql
 dev/config/apollo-federation/supergraph-config.yaml
 dev/config/apollo-federation/router.yaml
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key

@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "blink_ln_gateway",
+  "project_id": "42f7f7f3-3633-4702-9375-84dd8975e1c5"
+}
