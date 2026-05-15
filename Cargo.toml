@@ -33,6 +33,8 @@ serde_yaml = "0.9"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 tonic-health = "0.14"
 anyhow = "1"
+tonic_lnd = { version = "0.4", package = "fedimint-tonic-lnd", features = ["lightningrpc", "routerrpc"] }
+lightning-invoice = "0.33"
 
 [build-dependencies]
 tonic-prost-build = "0.14"
@@ -41,3 +43,6 @@ tonic-prost-build = "0.14"
 testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["postgres"] }
 mockall = "0.13"
+# Used by the integration suite to construct test BOLT11 invoices with
+# known amounts + payment-hashes via `lightning_invoice::InvoiceBuilder`.
+bitcoin = { version = "0.32", features = ["secp-recovery"], default-features = false }

@@ -222,6 +222,7 @@ impl TryFromEvents<InvoiceEvent> for Invoice {
 mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
+    use uuid::Uuid;
 
     fn fixed_now() -> Timestamp {
         Timestamp::from(Utc.with_ymd_and_hms(2026, 5, 7, 10, 0, 0).unwrap())
@@ -230,7 +231,7 @@ mod tests {
     fn ok_args() -> (PaymentHash, WalletId, MilliSatoshi, u32, BoltInvoice) {
         (
             PaymentHash::from([0xaa; 32]),
-            WalletId::new(),
+            WalletId::from(Uuid::now_v7()),
             MilliSatoshi::new(1_000_000),
             3600,
             BoltInvoice::new("lnbc1u1pj..."),

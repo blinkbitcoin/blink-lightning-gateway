@@ -40,8 +40,16 @@ impl From<AppError> for Status {
         match err {
             AppError::WalletOwnership(msg) => Status::permission_denied(msg),
             AppError::Invoice(inner) => Status::invalid_argument(inner.to_string()),
+            AppError::Payment(inner) => Status::invalid_argument(inner.to_string()),
+            AppError::InvalidBoltInvoice(msg) => {
+                Status::invalid_argument(format!("invalid bolt invoice: {msg}"))
+            }
             AppError::Lnd(inner) => {
                 ::tracing::error!(error = %inner, "LND error surfaced to gRPC layer");
+                Status::unavailable(inner.to_string())
+            }
+            AppError::Symphony(inner) => {
+                ::tracing::error!(error = %inner, "Symphony error surfaced to gRPC layer");
                 Status::unavailable(inner.to_string())
             }
             AppError::Outbox(inner) => Status::from(inner),

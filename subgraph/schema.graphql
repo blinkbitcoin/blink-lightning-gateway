@@ -36,9 +36,20 @@ input LnInvoiceCreateInput {
 	walletId: WalletId!
 }
 
+input LnInvoiceFeeProbeInput {
+	walletId: WalletId!
+	paymentRequest: LnPaymentRequest!
+}
+
 type LnInvoicePayload {
 	errors: [GraphqlError!]!
 	invoice: LnInvoice
+}
+
+input LnInvoicePaymentInput {
+	memo: Memo
+	paymentRequest: LnPaymentRequest!
+	walletId: WalletId!
 }
 
 scalar LnPaymentRequest
@@ -51,9 +62,29 @@ scalar Minutes
 
 type Mutation {
 	lnInvoiceCreate(input: LnInvoiceCreateInput!): LnInvoicePayload!
+	lnInvoicePaymentSend(input: LnInvoicePaymentInput!): PaymentSendPayload!
+	lnInvoiceFeeProbe(input: LnInvoiceFeeProbeInput!): SatAmountPayload!
 }
 
 scalar PaymentHash
+
+type PaymentSendPayload {
+	errors: [GraphqlError!]!
+	status: PaymentSendResult
+	transaction: Transaction
+}
+
+"""
+Galoy's `PaymentSendResult` enum — galoy publishes four values; the
+Slice-2 happy path returns `Pending` (synchronous LND `IN_FLIGHT`
+response).
+"""
+enum PaymentSendResult {
+	ALREADY_PAID
+	FAILURE
+	PENDING
+	SUCCESS
+}
 
 type Query {
 	"""
@@ -65,6 +96,21 @@ type Query {
 }
 
 scalar SatAmount
+
+type SatAmountPayload {
+	amount: SatAmount
+	errors: [GraphqlError!]!
+}
+
+"""
+Placeholder `Transaction` type. Slice-2 returns `None`; the full
+galoy-shape `Transaction` (legacy-ledger join + memo + status +
+settlement amount, etc.) lands in Story 5.1's cookie-cutter
+expansion.
+"""
+type Transaction {
+	id: String!
+}
 
 scalar TxExternalId
 

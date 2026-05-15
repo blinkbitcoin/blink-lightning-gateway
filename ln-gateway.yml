@@ -31,10 +31,17 @@ grpc_server:
 health_server:
   port: 8080
 
-# Symphony adapter. First inhabitant lands with Story 2.2's
-# `authorize_spend`-equivalent; the block stays here so the YAML
-# template doesn't need to change when that story arrives.
-symphony: {}
+# Symphony adapter
+symphony:
+  grpc_endpoint: "http://symphony:6580"
+
+# LND adapter. Story 2.2 keeps `LndClient` in boot_stub mode for the
+# binary's default run; uncomment to wire the real tonic-channel
+# connection against `tilt up`'s `lnd1` from `vendor/blink-quickstart`.
+# lnd:
+#   address: "https://localhost:10009"
+#   cert_path: "vendor/blink-quickstart/dev/lnd1/tls.cert"
+#   macaroon_path: "vendor/blink-quickstart/dev/lnd1/data/chain/bitcoin/regtest/admin.macaroon"
 
 # OpenTelemetry exporter (optional). With this block commented out the
 # binary falls back to a JSON-formatted `tracing-subscriber` on stdout.

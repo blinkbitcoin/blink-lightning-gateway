@@ -1,6 +1,11 @@
-//! Payment aggregate (per ADR #1). DDD shape: entity / repo / event / error. Real implementation lands in Story 2.1 (Slice 2 — payment send).
+//! Payment aggregate. DDD shape: entity / repo / event / error.
 
 pub mod entity;
 pub mod error;
 pub mod event;
 pub mod repo;
+
+pub use entity::{DecodedInvoice, NewPayment, Payment, PaymentState};
+pub use error::PaymentError;
+pub use event::{FailureReason, Hop, PaymentEvent};
+pub use repo::Payments;
