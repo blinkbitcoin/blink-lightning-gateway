@@ -93,31 +93,29 @@ impl FromStr for GatewayEventType {
 
 /// Gateway-specific domain events.
 ///
-/// `LightningInvoiceSettled` fires when LND tells us an incoming HTLC
-/// settled (`is_confirmed` on `subscribe_invoices`). Real production
-/// trigger lands in Story 2.3 — `App::handle_invoice_update` invokes
-/// `EventPublisher::publish_in_tx` from the subscription callback.
-///
-/// In Slice 1 the variant exists for pipeline coverage: integration
-/// tests insert a `LightningInvoiceSettled` outbox row directly via
-/// `EventPublisher::publish_in_tx` to demonstrate outbox → pg_notify
-/// → gRPC stream → consumer-side template firing end-to-end against
-/// the in-process Symphony stub + Cala mock. `App::create_invoice`
-/// does NOT emit this event — invoice creation isn't settlement.
-///
-/// Other variants (`LightningHtlcHeld`, `LightningInvoiceCanceled`,
-/// `LightningPaymentInitiated`, …) land alongside their owning
-/// stories (Story 2.3 onwards).
+/// `LightningInvoiceSettled` fires on the inbound (Slice 1) flow;
+/// `LightningPaymentInitiated`/`Completed`/`Failed` land in Story 2.2
+/// for the symmetric outbound flow. `LightningPaymentReversed` is
+/// reserved (the entity-level `Reversed` transition exists but Slice 2
+/// does not fire it).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GatewayDomainEvent {
     LightningInvoiceSettled,
+    LightningPaymentInitiated,
+    LightningPaymentCompleted,
+    LightningPaymentFailed,
+    LightningPaymentReversed,
 }
 
 impl GatewayDomainEvent {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::LightningInvoiceSettled => "lightning_invoice_settled",
+            Self::LightningPaymentInitiated => "lightning_payment_initiated",
+            Self::LightningPaymentCompleted => "lightning_payment_completed",
+            Self::LightningPaymentFailed => "lightning_payment_failed",
+            Self::LightningPaymentReversed => "lightning_payment_reversed",
         }
     }
 
@@ -125,6 +123,10 @@ impl GatewayDomainEvent {
     pub fn to_standardized(self) -> GatewayEventType {
         match self {
             Self::LightningInvoiceSettled => GatewayEventType::IncomingPaymentConfirmed,
+            Self::LightningPaymentInitiated => GatewayEventType::OutgoingPaymentInitiated,
+            Self::LightningPaymentCompleted => GatewayEventType::OutgoingPaymentCompleted,
+            Self::LightningPaymentFailed => GatewayEventType::OutgoingPaymentFailed,
+            Self::LightningPaymentReversed => GatewayEventType::OutgoingPaymentReversed,
         }
     }
 }
@@ -140,6 +142,10 @@ impl FromStr for GatewayDomainEvent {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "lightning_invoice_settled" => Ok(Self::LightningInvoiceSettled),
+            "lightning_payment_initiated" => Ok(Self::LightningPaymentInitiated),
+            "lightning_payment_completed" => Ok(Self::LightningPaymentCompleted),
+            "lightning_payment_failed" => Ok(Self::LightningPaymentFailed),
+            "lightning_payment_reversed" => Ok(Self::LightningPaymentReversed),
             other => Err(OutboxError::UnknownEventType(other.to_owned())),
         }
     }
@@ -214,6 +220,24 @@ pub struct NewOutboxEvent {
 }
 
 impl NewOutboxEvent {
+    fn new(
+        domain_event: GatewayDomainEvent,
+        correlation_id: impl Into<String>,
+        payment_hash_hex: impl Into<String>,
+        amount_sat: i64,
+        timestamp: DateTime<Utc>,
+        gateway_metadata: serde_json::Value,
+    ) -> Self {
+        Self {
+            correlation_id: correlation_id.into(),
+            domain_event,
+            reference_id: payment_hash_hex.into(),
+            amount_sat,
+            timestamp,
+            gateway_metadata,
+        }
+    }
+
     /// Construct a `LightningInvoiceSettled` outbox row. Production
     /// trigger (LND `subscribe_invoices` `is_confirmed` callback) lands
     /// in Story 2.3; until then this constructor is exercised only by
@@ -225,14 +249,83 @@ impl NewOutboxEvent {
         timestamp: DateTime<Utc>,
         gateway_metadata: serde_json::Value,
     ) -> Self {
-        Self {
-            correlation_id: correlation_id.into(),
-            domain_event: GatewayDomainEvent::LightningInvoiceSettled,
-            reference_id: payment_hash_hex.into(),
+        Self::new(
+            GatewayDomainEvent::LightningInvoiceSettled,
+            correlation_id,
+            payment_hash_hex,
             amount_sat,
             timestamp,
             gateway_metadata,
-        }
+        )
+    }
+
+    /// Construct a `LightningPaymentInitiated` outbox row. Fires when
+    /// LND accepts the outbound payment as `IN_FLIGHT`. The Symphony
+    /// `LIGHTNING_PAYMENT_INITIATED` template consumes this and posts
+    /// the PENDING-layer hold for `amount + max_fee` against the
+    /// sender's wallet. `gateway_metadata` MUST include
+    /// `max_fee_msat` so the SETTLED-layer release at completion time
+    /// can compute the asymmetric reimbursement.
+    pub fn for_lightning_payment_initiated(
+        correlation_id: impl Into<String>,
+        payment_hash_hex: impl Into<String>,
+        amount_sat: i64,
+        timestamp: DateTime<Utc>,
+        gateway_metadata: serde_json::Value,
+    ) -> Self {
+        Self::new(
+            GatewayDomainEvent::LightningPaymentInitiated,
+            correlation_id,
+            payment_hash_hex,
+            amount_sat,
+            timestamp,
+            gateway_metadata,
+        )
+    }
+
+    /// Construct a `LightningPaymentCompleted` outbox row. Fires when
+    /// LND's payment-subscription stream reports `SUCCEEDED`. The
+    /// Symphony `LIGHTNING_PAYMENT_OUT` template releases the
+    /// PENDING-layer hold (sized at `amount + max_fee`) and posts the
+    /// SETTLED-layer final debit (sized at `amount + actual_fee`).
+    /// `gateway_metadata.fees_paid_msat` is load-bearing.
+    pub fn for_lightning_payment_completed(
+        correlation_id: impl Into<String>,
+        payment_hash_hex: impl Into<String>,
+        amount_sat: i64,
+        timestamp: DateTime<Utc>,
+        gateway_metadata: serde_json::Value,
+    ) -> Self {
+        Self::new(
+            GatewayDomainEvent::LightningPaymentCompleted,
+            correlation_id,
+            payment_hash_hex,
+            amount_sat,
+            timestamp,
+            gateway_metadata,
+        )
+    }
+
+    /// Construct a `LightningPaymentFailed` outbox row. Fires when LND
+    /// rejects the payment (immediately at `send_payment` time, or
+    /// later via the `TrackPayments` stream). The Symphony
+    /// `LIGHTNING_PAYMENT_OUT_FAILED` template releases the
+    /// PENDING-layer hold; no SETTLED entries.
+    pub fn for_lightning_payment_failed(
+        correlation_id: impl Into<String>,
+        payment_hash_hex: impl Into<String>,
+        amount_sat: i64,
+        timestamp: DateTime<Utc>,
+        gateway_metadata: serde_json::Value,
+    ) -> Self {
+        Self::new(
+            GatewayDomainEvent::LightningPaymentFailed,
+            correlation_id,
+            payment_hash_hex,
+            amount_sat,
+            timestamp,
+            gateway_metadata,
+        )
     }
 }
 
@@ -240,12 +333,24 @@ impl NewOutboxEvent {
 mod tests {
     use super::*;
 
+    // Guards every arm of `GatewayDomainEvent::to_standardized`. The
+    // mapping is hand-written match arms with no type-system enforcement,
+    // so a swapped variant (e.g. Completed → Failed) would silently
+    // mis-route Symphony templates. Cheap to extend when a variant lands.
     #[test]
-    fn lightning_invoice_settled_maps_to_incoming_confirmed() {
-        assert_eq!(
-            GatewayDomainEvent::LightningInvoiceSettled.to_standardized(),
-            GatewayEventType::IncomingPaymentConfirmed
-        );
+    fn domain_event_maps_to_standardized() {
+        use GatewayDomainEvent as D;
+        use GatewayEventType as T;
+        let cases = [
+            (D::LightningInvoiceSettled, T::IncomingPaymentConfirmed),
+            (D::LightningPaymentInitiated, T::OutgoingPaymentInitiated),
+            (D::LightningPaymentCompleted, T::OutgoingPaymentCompleted),
+            (D::LightningPaymentFailed, T::OutgoingPaymentFailed),
+            (D::LightningPaymentReversed, T::OutgoingPaymentReversed),
+        ];
+        for (domain, expected) in cases {
+            assert_eq!(domain.to_standardized(), expected, "domain={domain:?}");
+        }
     }
 
     #[test]

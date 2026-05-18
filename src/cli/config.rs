@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 use super::db::DbConfig;
+use crate::lnd::LndConfig;
 use crate::server::config::{GrpcServerConfig, HealthServerConfig, SubgraphServerConfig};
 use crate::symphony::SymphonyConfig;
 use crate::tracing::TracingConfig;
@@ -24,6 +25,8 @@ pub struct Config {
     pub health_server: HealthServerConfig,
     #[serde(default)]
     pub symphony: SymphonyConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lnd: Option<LndConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tracing: Option<TracingConfig>,
 }

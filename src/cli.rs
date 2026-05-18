@@ -1,24 +1,5 @@
 //! Binary entrypoint: clap-based CLI + supervisor that boots the gRPC,
 //! GraphQL, and HTTP health servers and coordinates graceful shutdown.
-//!
-//! Shape mirrors `blink-card/src/cli/mod.rs:1-238`:
-//!   - clap derive `Cli` with `--config` + `--pg-con` + an optional
-//!     `migrate` subcommand.
-//!   - The default (no subcommand) runs `run_cmd`, which spawns each
-//!     server task and uses an `mpsc::channel(1)` to capture the first
-//!     exit reason — "first task to exit wins" pattern.
-//!
-//! Two deliberate divergences from blink-card:
-//!   1. The gateway adds an explicit SIGTERM-aware shutdown handler
-//!      that flips `tonic_health::HealthReporter::set_not_serving`
-//!      BEFORE cancelling the shutdown token, with a configurable grace
-//!      sleep between them. blink-card relies on the LB removing the
-//!      pod from rotation fast enough; the gateway hosts long-lived
-//!      `SubscribeEvents` streams, so the ordering matters.
-//!   2. The CLI has no `RAIN_API_KEY`/`VISA_API_KEY`/`BLINK_CORE_API_KEY`
-//!      env-var plumbing. The gateway talks to no third-party services
-//!      directly; Symphony does that on its own behalf. Future stories
-//!      add per-adapter flags as real upstreams arrive.
 
 pub mod config;
 pub mod db;
@@ -39,7 +20,9 @@ use crate::api::grpc::LightningPaymentGatewayService;
 use crate::app::App;
 use crate::cli::config::{Config, EnvOverride};
 use crate::lightning_payment_gateway::lightning_payment_gateway_server::LightningPaymentGatewayServer;
-use crate::lnd::{LndApi, LndClient, LndConfig};
+use crate::lnd::{subscribe_payments, LndApi, LndClient, LndConfig};
+use crate::outbox::EventPublisher;
+use crate::symphony::{LightningSymphonyClient, SymphonyClient};
 
 #[derive(Parser)]
 #[clap(long_about = None)]
@@ -115,18 +98,46 @@ async fn migrate_cmd(config: Config) -> anyhow::Result<()> {
 async fn run_cmd(config: Config) -> anyhow::Result<()> {
     let pool = db::init_pool(&config.db).await?;
 
-    // Boot stub for the LND adapter. The gRPC `SubscribeEvents` surface
-    // (Symphony's audience) and the HTTP health probes do not depend on
-    // LND, so the gateway is fully serviceable for those audiences. The
-    // GraphQL `lnInvoiceCreate` mutation will return `LndError::Stub`
-    // until Story 2.2 wires the real tonic-channel-backed connection.
-    let lnd: Arc<dyn LndApi> = Arc::new(LndClient::boot_stub(LndConfig::stub()));
-    warn!(
-        "LndClient is a boot stub — lnInvoiceCreate will return LndError::Stub \
-         until Story 2.2 wires real LND."
-    );
+    // LND adapter. When `config.lnd` is `Some`, open a real mTLS+macaroon
+    // tonic channel; when `None`, fall back to the boot stub so the gRPC
+    // `SubscribeEvents` surface and HTTP health probes stay serviceable
+    // for audiences that don't depend on LND.
+    let lnd_client = match &config.lnd {
+        Some(lnd_cfg) => match LndClient::connect(lnd_cfg.clone()).await {
+            Ok(client) => {
+                info!(address = %lnd_cfg.address, "Connected to LND");
+                client
+            }
+            Err(e) => {
+                anyhow::bail!("failed to connect to LND at {}: {e}", lnd_cfg.address);
+            }
+        },
+        None => {
+            warn!(
+                "No `lnd:` block in config; using LndClient boot stub. \
+                 lnInvoiceCreate / lnInvoicePaymentSend will return LndError::Stub."
+            );
+            LndClient::boot_stub(LndConfig::stub())
+        }
+    };
+    let lnd: Arc<dyn LndApi> = Arc::new(lnd_client.clone());
 
-    let app = App::new(pool.clone(), lnd);
+    let outbox = EventPublisher::new(&pool);
+
+    // Story 2.2 ships a stub `LightningSymphonyClient` that always
+    // returns `Approved`. Real wiring against Symphony's
+    // `LightningAuthorizationService` lands in Story 2.5.
+    let symphony: Arc<dyn SymphonyClient> = Arc::new(LightningSymphonyClient::new(
+        config.symphony.grpc_endpoint.clone(),
+    ));
+    if let Err(e) = config.symphony.validate() {
+        warn!(
+            error = %e,
+            "symphony.grpc_endpoint not set; falling back to stub client (Approved-only)"
+        );
+    }
+
+    let app = App::new(pool.clone(), lnd, outbox, symphony);
 
     let cancel = CancellationToken::new();
     let (send, mut receive) = tokio::sync::mpsc::channel::<anyhow::Result<()>>(1);
@@ -190,6 +201,47 @@ async fn run_cmd(config: Config) -> anyhow::Result<()> {
                 .map_err(anyhow::Error::from)
                 .context("HTTP health server error");
             report_exit(&send, result);
+        }));
+    }
+
+    // LND payment-subscription task. Forwards
+    // `Router/TrackPayments` events into `App::handle_payment_update`.
+    // Boot-stub path: the task awaits cancellation without opening the
+    // stream and exits cleanly without reporting an error to the
+    // supervisor channel.
+    {
+        let cancel = cancel.clone();
+        let app = app.clone();
+        let lnd_for_sub = lnd_client.clone();
+        let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(64);
+        let cancel_for_sub = cancel.clone();
+        info!("Starting LND payment-subscription task");
+        handles.push(tokio::spawn(async move {
+            // Spawn the consumer side concurrently: each PaymentUpdate
+            // hands off to App::handle_payment_update. The producer
+            // (`subscribe_payments`) owns the stream; we drain its
+            // output here.
+            let consumer_cancel = cancel_for_sub.clone();
+            let app_for_consumer = app.clone();
+            let consumer = tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = consumer_cancel.cancelled() => return,
+                        update = update_rx.recv() => {
+                            let Some(update) = update else { return; };
+                            if let Err(e) = app_for_consumer.handle_payment_update(update).await {
+                                warn!(error = %e, "handle_payment_update returned error");
+                            }
+                        }
+                    }
+                }
+            });
+            let _ = subscribe_payments(lnd_for_sub, update_tx, cancel_for_sub).await;
+            // Producer exited; let the consumer drain queued updates,
+            // then return.
+            let _ = consumer.await;
+            warn!("LND payment-subscription task exited");
+            let _ = cancel;
         }));
     }
 
