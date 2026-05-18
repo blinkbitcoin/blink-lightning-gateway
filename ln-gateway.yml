@@ -35,13 +35,14 @@ health_server:
 symphony:
   grpc_endpoint: "http://symphony:6580"
 
-# LND adapter. Story 2.2 keeps `LndClient` in boot_stub mode for the
-# binary's default run; uncomment to wire the real tonic-channel
-# connection against `tilt up`'s `lnd1` from `vendor/blink-quickstart`.
-# lnd:
-#   address: "https://localhost:10009"
-#   cert_path: "vendor/blink-quickstart/dev/lnd1/tls.cert"
-#   macaroon_path: "vendor/blink-quickstart/dev/lnd1/data/chain/bitcoin/regtest/admin.macaroon"
+# LND adapter. The default points at `tilt up`'s `lnd1` from
+# `vendor/blink-quickstart`. Remove this block (or set it to a path
+# that does not resolve) to fall back to `LndClient::boot_stub`, in
+# which every LND RPC returns `LndError::Stub`.
+lnd:
+  address: "https://localhost:10009"
+  cert_path: "vendor/blink-quickstart/dev/config/lnd/tls.cert"
+  macaroon_path: "vendor/blink-quickstart/dev/config/lnd/regtest/lnd1.admin.macaroon"
 
 # OpenTelemetry exporter (optional). With this block commented out the
 # binary falls back to a JSON-formatted `tracing-subscriber` on stdout.

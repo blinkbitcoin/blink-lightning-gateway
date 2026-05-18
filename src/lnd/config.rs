@@ -9,10 +9,9 @@ use std::path::PathBuf;
 pub struct LndConfig {
     /// `host:port` form, e.g. `lnd1:10009`.
     pub address: String,
-    /// Path to the TLS cert file LND signs its gRPC server with.
+    /// Path to the TLS cert file
     pub cert_path: PathBuf,
-    /// Path to the LND admin macaroon. Should be read-only on disk in
-    /// production.
+    /// Path to the LND macaroon
     pub macaroon_path: PathBuf,
 }
 
