@@ -5,7 +5,8 @@
 //! Notes.
 
 use async_graphql::{
-    InputObject, InputValueError, InputValueResult, Object, Scalar, ScalarType, SimpleObject, Value,
+    Enum, InputObject, InputValueError, InputValueResult, Object, Scalar, ScalarType, SimpleObject,
+    Value,
 };
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
@@ -18,8 +19,7 @@ use crate::primitives::{
 // Scalars
 // ---------------------------------------------------------------------------
 
-/// Galoy parses `SatAmount` from JSON Number (positive integer); we accept
-/// String too for the test rig that sends `amount: "1000"`.
+/// Non-negative integer amount in satoshis. Accepts JSON Number or String.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SatAmount(pub u64);
 
@@ -54,7 +54,7 @@ impl SatAmount {
     }
 }
 
-/// Expiry in minutes (galoy: `Minutes`). Range 1..=1440 (24h).
+/// Duration in minutes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Minutes(pub u32);
 
@@ -79,8 +79,7 @@ impl ScalarType for Minutes {
     }
 }
 
-/// External reference id supplied by the client (galoy: `TxExternalId`).
-/// Slice 1a accepts and ignores; full implementation lands later.
+/// Client-supplied external reference id for the transaction.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TxExternalId(pub String);
 
@@ -97,7 +96,7 @@ impl ScalarType for TxExternalId {
     }
 }
 
-/// Memo (galoy: `Memo`).
+/// Free-form memo string.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Memo(pub String);
 
@@ -114,7 +113,7 @@ impl ScalarType for Memo {
     }
 }
 
-/// `WalletId` — UUID. Wraps the domain's `WalletId`.
+/// UUID identifying a wallet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WalletId(pub DomainWalletId);
 
@@ -139,7 +138,7 @@ impl From<WalletId> for DomainWalletId {
     }
 }
 
-/// `PaymentHash` — 64-char hex. Wraps the domain `PaymentHash`.
+/// 32-byte SHA-256 payment hash, hex-encoded (64 lowercase chars).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PaymentHash(pub DomainPaymentHash);
 
@@ -158,7 +157,7 @@ impl ScalarType for PaymentHash {
     }
 }
 
-/// `LnPaymentRequest` — opaque BOLT11.
+/// BOLT11 invoice string.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LnPaymentRequest(pub String);
 
@@ -181,9 +180,7 @@ impl From<BoltInvoice> for LnPaymentRequest {
     }
 }
 
-/// `LnPaymentSecret` — 32-byte secret as hex. Slice 1a hard-codes empty;
-/// real value comes from LND's `add_invoice` `payment_addr` field once
-/// wired (Story 1.6).
+/// BOLT11 payment secret (32-byte `payment_addr`, hex-encoded).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LnPaymentSecret(pub String);
 
@@ -217,11 +214,7 @@ pub struct LnInvoiceCreateInput {
     pub wallet_id: WalletId,
 }
 
-/// Concrete error shape returned in `LnInvoicePayload.errors`. Galoy's
-/// schema declares an `interface Error` with multiple concrete impls;
-/// Story 5.1 adds the interface and per-error-class types when it builds
-/// out the remaining 26 operations. Slice 1a returns only the generic
-/// message.
+/// Error returned in a payload's `errors` array.
 #[derive(SimpleObject, Clone, Debug)]
 #[graphql(name = "GraphqlError")]
 pub struct GraphqlError {
@@ -256,5 +249,75 @@ impl LnInvoicePayload {
     }
     async fn invoice(&self) -> Option<&LnInvoice> {
         self.invoice.as_ref()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Outbound payment types (Slice 2)
+// ---------------------------------------------------------------------------
+
+/// Outcome of a payment-send mutation.
+#[derive(Enum, Copy, Clone, Eq, PartialEq, Debug)]
+#[graphql(name = "PaymentSendResult")]
+pub enum PaymentSendResult {
+    AlreadyPaid,
+    Failure,
+    Pending,
+    Success,
+}
+
+#[derive(InputObject)]
+#[graphql(name = "LnInvoicePaymentInput")]
+pub struct LnInvoicePaymentInput {
+    pub memo: Option<Memo>,
+    pub payment_request: LnPaymentRequest,
+    pub wallet_id: WalletId,
+}
+
+#[derive(InputObject)]
+#[graphql(name = "LnInvoiceFeeProbeInput")]
+pub struct LnInvoiceFeeProbeInput {
+    pub wallet_id: WalletId,
+    pub payment_request: LnPaymentRequest,
+}
+
+/// Settled transaction record.
+#[derive(SimpleObject, Clone, Debug)]
+#[graphql(name = "Transaction")]
+pub struct Transaction {
+    pub id: String,
+}
+
+pub struct PaymentSendPayload {
+    pub errors: Vec<GraphqlError>,
+    pub status: Option<PaymentSendResult>,
+    pub transaction: Option<Transaction>,
+}
+
+#[Object]
+impl PaymentSendPayload {
+    async fn errors(&self) -> &[GraphqlError] {
+        &self.errors
+    }
+    async fn status(&self) -> Option<PaymentSendResult> {
+        self.status
+    }
+    async fn transaction(&self) -> Option<&Transaction> {
+        self.transaction.as_ref()
+    }
+}
+
+pub struct SatAmountPayload {
+    pub amount: Option<SatAmount>,
+    pub errors: Vec<GraphqlError>,
+}
+
+#[Object]
+impl SatAmountPayload {
+    async fn amount(&self) -> Option<SatAmount> {
+        self.amount
+    }
+    async fn errors(&self) -> &[GraphqlError] {
+        &self.errors
     }
 }

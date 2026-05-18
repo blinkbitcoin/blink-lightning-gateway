@@ -15,13 +15,29 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use blink_lightning_gateway::api::graphql::build_schema;
 use blink_lightning_gateway::app::App;
-use blink_lightning_gateway::lnd::{AddInvoiceParams, AddInvoiceResponse, LndApi, LndError};
+use blink_lightning_gateway::lnd::{
+    AddInvoiceParams, AddInvoiceResponse, FeeProbeParams, FeeProbeResponse, LndApi, LndError,
+    SendPaymentParams, SendPaymentResponse,
+};
+use blink_lightning_gateway::outbox::EventPublisher;
+use blink_lightning_gateway::symphony::{LightningSymphonyClient, SymphonyClient};
 
 struct StubLnd;
 
 #[async_trait]
 impl LndApi for StubLnd {
     async fn add_invoice(&self, _params: AddInvoiceParams) -> Result<AddInvoiceResponse, LndError> {
+        Err(LndError::Stub)
+    }
+
+    async fn send_payment(
+        &self,
+        _params: SendPaymentParams,
+    ) -> Result<SendPaymentResponse, LndError> {
+        Err(LndError::Stub)
+    }
+
+    async fn fee_probe(&self, _params: FeeProbeParams) -> Result<FeeProbeResponse, LndError> {
         Err(LndError::Stub)
     }
 }
@@ -35,7 +51,9 @@ async fn main() {
         .connect_lazy("postgres://stub:stub@localhost/stub")
         .expect("connect_lazy");
 
-    let app = App::new(pool, Arc::new(StubLnd));
+    let outbox = EventPublisher::new(&pool);
+    let symphony: Arc<dyn SymphonyClient> = Arc::new(LightningSymphonyClient::new(""));
+    let app = App::new(pool, Arc::new(StubLnd), outbox, symphony);
     let schema = build_schema(app);
     println!("{}", schema.sdl());
 }

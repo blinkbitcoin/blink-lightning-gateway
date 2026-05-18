@@ -1,9 +1,5 @@
 """
-Concrete error shape returned in `LnInvoicePayload.errors`. Galoy's
-schema declares an `interface Error` with multiple concrete impls;
-Story 5.1 adds the interface and per-error-class types when it builds
-out the remaining 26 operations. Slice 1a returns only the generic
-message.
+Error returned in a payload's `errors` array.
 """
 type GraphqlError {
 	message: String!
@@ -75,9 +71,7 @@ type PaymentSendPayload {
 }
 
 """
-Galoy's `PaymentSendResult` enum — galoy publishes four values; the
-Slice-2 happy path returns `Pending` (synchronous LND `IN_FLIGHT`
-response).
+Outcome of a payment-send mutation.
 """
 enum PaymentSendResult {
 	ALREADY_PAID
@@ -103,10 +97,7 @@ type SatAmountPayload {
 }
 
 """
-Placeholder `Transaction` type. Slice-2 returns `None`; the full
-galoy-shape `Transaction` (legacy-ledger join + memo + status +
-settlement amount, etc.) lands in Story 5.1's cookie-cutter
-expansion.
+Settled transaction record.
 """
 type Transaction {
 	id: String!

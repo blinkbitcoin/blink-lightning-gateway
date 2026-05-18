@@ -7,10 +7,12 @@ use async_graphql::{Context, Object};
 use es_entity::EsEntity;
 
 use super::types::{
-    GraphqlError, LnInvoice, LnInvoiceCreateInput, LnInvoicePayload, LnPaymentRequest,
-    LnPaymentSecret, PaymentHash as GqlPaymentHash, SatAmount,
+    GraphqlError, LnInvoice, LnInvoiceCreateInput, LnInvoiceFeeProbeInput, LnInvoicePayload,
+    LnInvoicePaymentInput, LnPaymentRequest, LnPaymentSecret, PaymentHash as GqlPaymentHash,
+    PaymentSendPayload, PaymentSendResult, SatAmount, SatAmountPayload,
 };
-use crate::app::{App, NewInvoiceRequest};
+use crate::app::{App, FeeProbeRequest, NewInvoiceRequest, SendPaymentRequest};
+use crate::payment::PaymentState;
 
 pub struct Mutation;
 
@@ -63,6 +65,72 @@ impl Mutation {
             Err(e) => Ok(LnInvoicePayload {
                 errors: vec![GraphqlError::from_message(e.to_string())],
                 invoice: None,
+            }),
+        }
+    }
+
+    async fn ln_invoice_payment_send(
+        &self,
+        ctx: &Context<'_>,
+        input: LnInvoicePaymentInput,
+    ) -> async_graphql::Result<PaymentSendPayload> {
+        let app = ctx
+            .data::<App>()
+            .map_err(|_| async_graphql::Error::new("App coordinator not configured"))?;
+
+        let request = SendPaymentRequest {
+            wallet_id: input.wallet_id.into(),
+            payment_request: input.payment_request.0,
+            memo: input.memo.map(|m| m.0),
+        };
+
+        match app.send_payment(request).await {
+            Ok(payment) => {
+                // Slice-2 returns `Pending` for the synchronous-`InFlight`
+                // path and `Success` for the rare synchronous-success
+                // path. `Failure` rides through the resolver `Err` branch.
+                let status = match payment.state {
+                    PaymentState::Pending | PaymentState::Initiated => PaymentSendResult::Pending,
+                    PaymentState::Completed => PaymentSendResult::Success,
+                    PaymentState::Failed => PaymentSendResult::Failure,
+                    PaymentState::Reversed => PaymentSendResult::Failure,
+                };
+                Ok(PaymentSendPayload {
+                    errors: Vec::new(),
+                    status: Some(status),
+                    transaction: None,
+                })
+            }
+            Err(e) => Ok(PaymentSendPayload {
+                errors: vec![GraphqlError::from_message(e.to_string())],
+                status: Some(PaymentSendResult::Failure),
+                transaction: None,
+            }),
+        }
+    }
+
+    async fn ln_invoice_fee_probe(
+        &self,
+        ctx: &Context<'_>,
+        input: LnInvoiceFeeProbeInput,
+    ) -> async_graphql::Result<SatAmountPayload> {
+        let app = ctx
+            .data::<App>()
+            .map_err(|_| async_graphql::Error::new("App coordinator not configured"))?;
+
+        let request = FeeProbeRequest {
+            wallet_id: input.wallet_id.into(),
+            payment_request: input.payment_request.0,
+        };
+
+        match app.fee_probe(request).await {
+            Ok(fee_msat) => Ok(SatAmountPayload {
+                amount: Some(SatAmount(fee_msat.as_u64() / 1000)),
+                errors: Vec::new(),
+            }),
+            Err(e) => Ok(SatAmountPayload {
+                amount: None,
+                errors: vec![GraphqlError::from_message(e.to_string())],
             }),
         }
     }
