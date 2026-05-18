@@ -47,10 +47,21 @@ set +a
 cargo run{flag} --bin blink-lightning-gateway
 """.format(flag=cargo_flag)
 
+# Kill any orphaned gateway from a previous session. Tilt's `local_resource`
+# child gets reparented to launchd if Tilt itself dies (force-quit, crash,
+# terminal closed), and on slow shutdowns Tilt may give up before our
+# SIGTERM handler completes its grace-window drain. Either way, the next
+# `tilt up` finds ports 6691 + 8080 occupied. The `|| true` keeps `cmd`
+# happy when there's nothing to kill.
+gateway_build_cmd = (
+    'pkill -9 -f "target/(release|debug)/blink-lightning-gateway" || true; ' +
+    'cargo build' + cargo_flag
+)
+
 local_resource(
   name='blink-lightning-gateway',
   labels=['blink-lightning-gateway'],
-  cmd='cargo build' + cargo_flag,
+  cmd=gateway_build_cmd,
   serve_cmd=gateway_serve_cmd,
   serve_env={
     "PG_CON": "postgres://postgres:postgres@localhost:5435/blink_lightning_gateway",
