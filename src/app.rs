@@ -391,8 +391,8 @@ impl App {
         max_fee_msat: MilliSatoshi,
         now: Timestamp,
     ) -> Result<Payment, AppError> {
-        let events = match payment.mark_pending(now)? {
-            Idempotent::Executed(events) => events,
+        match payment.mark_pending(now)? {
+            Idempotent::Executed(()) => {}
             Idempotent::Ignored => {
                 ::tracing::info!(
                     payment_hash = %payment_hash.to_hex(),
@@ -401,9 +401,7 @@ impl App {
                 );
                 return Ok(payment);
             }
-        };
-        payment.events_mut().extend(events);
-        payment.state = crate::payment::PaymentState::Pending;
+        }
 
         let mut tx = self.pool.begin().await?;
         self.payments
@@ -440,8 +438,8 @@ impl App {
         route_hops: Vec<crate::payment::Hop>,
         now: Timestamp,
     ) -> Result<Payment, AppError> {
-        let events = match payment.settle(preimage, fees_paid_msat, route_hops.clone(), now)? {
-            Idempotent::Executed(events) => events,
+        match payment.settle(preimage, fees_paid_msat, route_hops.clone(), now)? {
+            Idempotent::Executed(()) => {}
             Idempotent::Ignored => {
                 ::tracing::info!(
                     payment_hash = %payment_hash.to_hex(),
@@ -450,9 +448,7 @@ impl App {
                 );
                 return Ok(payment);
             }
-        };
-        payment.events_mut().extend(events);
-        payment.state = crate::payment::PaymentState::Completed;
+        }
 
         let mut tx = self.pool.begin().await?;
         self.payments
@@ -499,8 +495,8 @@ impl App {
         now: Timestamp,
     ) -> Result<Payment, AppError> {
         let reason_str = failure_reason.as_str().to_owned();
-        let events = match payment.fail(failure_reason, now)? {
-            Idempotent::Executed(events) => events,
+        match payment.fail(failure_reason, now)? {
+            Idempotent::Executed(()) => {}
             Idempotent::Ignored => {
                 ::tracing::info!(
                     payment_hash = %payment_hash.to_hex(),
@@ -509,9 +505,7 @@ impl App {
                 );
                 return Ok(payment);
             }
-        };
-        payment.events_mut().extend(events);
-        payment.state = crate::payment::PaymentState::Failed;
+        }
 
         let mut tx = self.pool.begin().await?;
         self.payments

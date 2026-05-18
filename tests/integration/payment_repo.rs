@@ -1,6 +1,6 @@
 //! `Payments` repo coverage: round-trips against Postgres
 
-use es_entity::{EsEntity, Idempotent};
+use es_entity::Idempotent;
 
 use blink_lightning_gateway::payment::entity::{DecodedInvoice, NewPayment};
 use blink_lightning_gateway::payment::{Hop, PaymentState, Payments};
@@ -58,19 +58,17 @@ async fn update_in_op_persists_pending_event_and_state_transition() {
 
     // Mark pending in one transaction.
     let mut tx = pool.begin().await.unwrap();
-    let events = match payment.mark_pending(Timestamp::now()).expect("pending") {
-        Idempotent::Executed(events) => events,
+    match payment.mark_pending(Timestamp::now()).expect("pending") {
+        Idempotent::Executed(()) => {}
         Idempotent::Ignored => panic!("first mark_pending should execute"),
-    };
-    payment.events_mut().extend(events);
-    payment.state = PaymentState::Pending;
+    }
     payments
         .update_in_op(&mut tx, &mut payment)
         .await
         .expect("update");
     tx.commit().await.unwrap();
 
-    let reloaded = payments
+    let mut reloaded = payments
         .find_by_payment_hash(&PaymentHash::from([0xcc; 32]))
         .await
         .expect("find");
@@ -78,7 +76,7 @@ async fn update_in_op_persists_pending_event_and_state_transition() {
 
     // settle.
     let mut tx = pool.begin().await.unwrap();
-    let events = match reloaded
+    match reloaded
         .settle(
             Preimage::from([0xdd; 32]),
             MilliSatoshi::new(200),
@@ -87,14 +85,11 @@ async fn update_in_op_persists_pending_event_and_state_transition() {
         )
         .expect("settle")
     {
-        Idempotent::Executed(events) => events,
+        Idempotent::Executed(()) => {}
         Idempotent::Ignored => panic!("first settle should execute"),
-    };
-    let mut after_settle = reloaded;
-    after_settle.events_mut().extend(events);
-    after_settle.state = PaymentState::Completed;
+    }
     payments
-        .update_in_op(&mut tx, &mut after_settle)
+        .update_in_op(&mut tx, &mut reloaded)
         .await
         .expect("update");
     tx.commit().await.unwrap();

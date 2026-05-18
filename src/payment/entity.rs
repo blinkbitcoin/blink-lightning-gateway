@@ -5,23 +5,15 @@
 //! `DecodedInvoice` so BOLT11 parsing stays at the GraphQL/App
 //! boundary and the entity remains infrastructure-free.
 //!
-//! Pure command methods (`mark_pending`, `settle`, `fail`, `reverse`)
-//! return `Result<Idempotent<Vec<PaymentEvent>>, PaymentError>` — three
-//! outcomes layered together:
+//! Command methods (`mark_pending`, `settle`, `fail`, `reverse`) take
+//! `&mut self`, mutate projected state, and push the event before
+//! returning — canonical es-entity pattern.
 //!
-//! - `Ok(Idempotent::Executed(events))` — first-time application, push
-//!   the events and persist.
-//! - `Ok(Idempotent::Ignored)` — the same outcome is already in the
-//!   event log. This is the LND-replay defense — `track_payments` and
-//!   invoice subscription streams replay history on reconnect, and we
-//!   want those duplicates to be safe no-ops, not handler errors. The
-//!   App layer short-circuits without writing.
-//! - `Err(PaymentError::InvalidStateTransition)` — genuine contradiction
-//!   (e.g. `settle` after a `Failed` event), preserved as a hard error
-//!   so contradictions surface rather than silently being swallowed.
-//!
-//! The App layer is responsible for persisting the returned events
-//! through `Payments::update_in_op` when the result is `Executed`.
+//! Return is `Result<Idempotent<()>, PaymentError>`:
+//! - `Ok(Idempotent::Executed(()))` — first application; caller persists.
+//! - `Ok(Idempotent::Ignored)` — duplicate replay (LND stream reconnect).
+//! - `Err(InvalidStateTransition)` — genuine contradiction (e.g. settle
+//!   after a Failed event).
 
 use es_entity::{
     idempotency_guard, EntityEvents, EsEntity, EsEntityError, Idempotent, IntoEvents, TryFromEvents,
@@ -190,9 +182,9 @@ impl Payment {
     /// surfaces as `InvalidStateTransition` rather than being silently
     /// ignored.
     pub fn mark_pending(
-        &self,
+        &mut self,
         sent_at: Timestamp,
-    ) -> Result<Idempotent<Vec<PaymentEvent>>, PaymentError> {
+    ) -> Result<Idempotent<()>, PaymentError> {
         idempotency_guard!(self.events.iter_all().rev(), PaymentEvent::Pending { .. });
         if !matches!(self.state, PaymentState::Initiated) {
             return Err(PaymentError::InvalidStateTransition {
@@ -200,9 +192,9 @@ impl Payment {
                 attempted: "mark_pending",
             });
         }
-        Ok(Idempotent::Executed(vec![PaymentEvent::Pending {
-            sent_at,
-        }]))
+        self.events.push(PaymentEvent::Pending { sent_at });
+        self.state = PaymentState::Pending;
+        Ok(Idempotent::Executed(()))
     }
 
     /// Transition `(Initiated|Pending) → Completed` on LND `SUCCEEDED`.
@@ -212,12 +204,12 @@ impl Payment {
     /// contradiction and surfaces as `InvalidStateTransition` — we do
     /// not silently overwrite a terminal-failure determination.
     pub fn settle(
-        &self,
+        &mut self,
         payment_preimage: Preimage,
         fees_paid_msat: MilliSatoshi,
         route_hops: Vec<Hop>,
         settled_at: Timestamp,
-    ) -> Result<Idempotent<Vec<PaymentEvent>>, PaymentError> {
+    ) -> Result<Idempotent<()>, PaymentError> {
         idempotency_guard!(self.events.iter_all().rev(), PaymentEvent::Completed { .. });
         if !matches!(self.state, PaymentState::Initiated | PaymentState::Pending) {
             return Err(PaymentError::InvalidStateTransition {
@@ -225,12 +217,17 @@ impl Payment {
                 attempted: "settle",
             });
         }
-        Ok(Idempotent::Executed(vec![PaymentEvent::Completed {
+        self.events.push(PaymentEvent::Completed {
             settled_at,
             payment_preimage,
             fees_paid_msat,
             route_hops,
-        }]))
+        });
+        self.state = PaymentState::Completed;
+        self.fees_paid_msat = Some(fees_paid_msat);
+        self.payment_preimage = Some(payment_preimage);
+        self.settled_at = Some(settled_at);
+        Ok(Idempotent::Executed(()))
     }
 
     /// Transition `(Initiated|Pending) → Failed`.
@@ -239,10 +236,10 @@ impl Payment {
     /// A prior `Completed` or `Reversed` event is a genuine contradiction
     /// and surfaces as `InvalidStateTransition`.
     pub fn fail(
-        &self,
+        &mut self,
         failure_reason: FailureReason,
         failed_at: Timestamp,
-    ) -> Result<Idempotent<Vec<PaymentEvent>>, PaymentError> {
+    ) -> Result<Idempotent<()>, PaymentError> {
         idempotency_guard!(self.events.iter_all().rev(), PaymentEvent::Failed { .. });
         if !matches!(self.state, PaymentState::Initiated | PaymentState::Pending) {
             return Err(PaymentError::InvalidStateTransition {
@@ -250,10 +247,12 @@ impl Payment {
                 attempted: "fail",
             });
         }
-        Ok(Idempotent::Executed(vec![PaymentEvent::Failed {
+        self.events.push(PaymentEvent::Failed {
             failed_at,
             failure_reason,
-        }]))
+        });
+        self.state = PaymentState::Failed;
+        Ok(Idempotent::Executed(()))
     }
 
     /// Transition `Completed → Reversed`. Slice-2 does not exercise this;
@@ -262,10 +261,10 @@ impl Payment {
     /// Idempotent on any prior `Reversed` event. Anything other than a
     /// prior `Completed` state is a contradiction.
     pub fn reverse(
-        &self,
+        &mut self,
         reason: String,
         reversed_at: Timestamp,
-    ) -> Result<Idempotent<Vec<PaymentEvent>>, PaymentError> {
+    ) -> Result<Idempotent<()>, PaymentError> {
         idempotency_guard!(self.events.iter_all().rev(), PaymentEvent::Reversed { .. });
         if !matches!(self.state, PaymentState::Completed) {
             return Err(PaymentError::InvalidStateTransition {
@@ -273,10 +272,12 @@ impl Payment {
                 attempted: "reverse",
             });
         }
-        Ok(Idempotent::Executed(vec![PaymentEvent::Reversed {
+        self.events.push(PaymentEvent::Reversed {
             reversed_at,
             reason,
-        }]))
+        });
+        self.state = PaymentState::Reversed;
+        Ok(Idempotent::Executed(()))
     }
 }
 
@@ -509,10 +510,8 @@ mod tests {
         Payment::try_from_events(new.into_events()).unwrap()
     }
 
-    /// Push a hand-constructed event into the entity's event log + sync
-    /// the projected state. The pure command-method tests don't go
-    /// through the repo, so this simulates what `update_in_op` would
-    /// have done after a successful command.
+    /// Fast-forward to an arbitrary state without going through the
+    /// command-method flow — lets a single test start from any state.
     fn push_event(p: &mut Payment, event: PaymentEvent, new_state: PaymentState) {
         p.events_mut().extend(std::iter::once(event));
         p.state = new_state;
@@ -545,13 +544,10 @@ mod tests {
 
     #[test]
     fn mark_pending_from_initiated_executes() {
-        let p = fresh_payment();
+        let mut p = fresh_payment();
         let outcome = p.mark_pending(fixed_now()).unwrap();
-        let events = match outcome {
-            Idempotent::Executed(e) => e,
-            Idempotent::Ignored => panic!("expected Executed"),
-        };
-        assert!(matches!(events.as_slice(), [PaymentEvent::Pending { .. }]));
+        assert!(matches!(outcome, Idempotent::Executed(())));
+        assert_eq!(p.state, PaymentState::Pending);
     }
 
     #[test]
@@ -572,25 +568,19 @@ mod tests {
                 fixed_now(),
             )
             .unwrap();
-        let events = match outcome {
-            Idempotent::Executed(e) => e,
-            Idempotent::Ignored => panic!("expected Executed"),
-        };
-        assert!(matches!(
-            events.as_slice(),
-            [PaymentEvent::Completed { .. }]
-        ));
+        assert!(matches!(outcome, Idempotent::Executed(())));
+        assert_eq!(p.state, PaymentState::Completed);
+        assert_eq!(p.fees_paid_msat, Some(MilliSatoshi::new(50)));
+        assert_eq!(p.payment_preimage, Some(Preimage::from([0xdd; 32])));
+        assert!(p.settled_at.is_some());
     }
 
     #[test]
     fn fail_from_initiated_executes() {
-        let p = fresh_payment();
+        let mut p = fresh_payment();
         let outcome = p.fail(FailureReason::Timeout, fixed_now()).unwrap();
-        let events = match outcome {
-            Idempotent::Executed(e) => e,
-            Idempotent::Ignored => panic!("expected Executed"),
-        };
-        assert!(matches!(events.as_slice(), [PaymentEvent::Failed { .. }]));
+        assert!(matches!(outcome, Idempotent::Executed(())));
+        assert_eq!(p.state, PaymentState::Failed);
     }
 
     // ---- idempotent replays ---
