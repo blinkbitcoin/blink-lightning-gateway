@@ -38,9 +38,11 @@ use blink_lightning_gateway::lightning_payment_gateway::{
     lightning_payment_gateway_server::LightningPaymentGatewayServer, SubscribeEventsRequest,
 };
 use blink_lightning_gateway::lnd::{LndApi, LndClient, LndConfig};
+use blink_lightning_gateway::outbox::EventPublisher;
 use blink_lightning_gateway::server::{
     run_graphql_server, run_grpc_server, GrpcServerConfig, SubgraphServerConfig,
 };
+use blink_lightning_gateway::symphony::{LightningSymphonyClient, SymphonyClient};
 
 use crate::common::TestDatabase;
 
@@ -144,7 +146,9 @@ async fn server_lifecycle_drains_in_flight_subscribers_on_cancel() {
     // `src/cli.rs::run_cmd` does — the test only exercises init +
     // shutdown, not the `lnInvoiceCreate` happy path.
     let lnd: Arc<dyn LndApi> = Arc::new(LndClient::boot_stub(LndConfig::stub()));
-    let app = App::new(db.pool.clone(), lnd);
+    let outbox = EventPublisher::new(&db.pool);
+    let symphony: Arc<dyn SymphonyClient> = Arc::new(LightningSymphonyClient::new(""));
+    let app = App::new(db.pool.clone(), lnd, outbox, symphony);
     let graphql_config = SubgraphServerConfig {
         port: graphql_port,
         ..SubgraphServerConfig::default()

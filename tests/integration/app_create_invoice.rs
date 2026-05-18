@@ -7,8 +7,14 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use blink_lightning_gateway::app::{App, AppError, NewInvoiceRequest};
-use blink_lightning_gateway::lnd::{AddInvoiceParams, AddInvoiceResponse, LndApi, LndError};
+use blink_lightning_gateway::lnd::{
+    AddInvoiceParams, AddInvoiceResponse, FeeProbeParams, FeeProbeResponse, LndApi, LndError,
+    SendPaymentParams, SendPaymentResponse,
+};
+use blink_lightning_gateway::outbox::EventPublisher;
 use blink_lightning_gateway::primitives::{BoltInvoice, MilliSatoshi, PaymentHash, WalletId};
+use blink_lightning_gateway::symphony::{LightningSymphonyClient, SymphonyClient};
+use uuid::Uuid;
 
 use crate::common::TestDatabase;
 
@@ -25,6 +31,17 @@ impl LndApi for CannedOkLnd {
             bolt_invoice: BoltInvoice::new("lnbc10n1pj..."),
         })
     }
+
+    async fn send_payment(
+        &self,
+        _params: SendPaymentParams,
+    ) -> Result<SendPaymentResponse, LndError> {
+        Err(LndError::Stub)
+    }
+
+    async fn fee_probe(&self, _params: FeeProbeParams) -> Result<FeeProbeResponse, LndError> {
+        Err(LndError::Stub)
+    }
 }
 
 struct CannedErrLnd;
@@ -34,11 +51,22 @@ impl LndApi for CannedErrLnd {
     async fn add_invoice(&self, _params: AddInvoiceParams) -> Result<AddInvoiceResponse, LndError> {
         Err(LndError::Stub)
     }
+
+    async fn send_payment(
+        &self,
+        _params: SendPaymentParams,
+    ) -> Result<SendPaymentResponse, LndError> {
+        Err(LndError::Stub)
+    }
+
+    async fn fee_probe(&self, _params: FeeProbeParams) -> Result<FeeProbeResponse, LndError> {
+        Err(LndError::Stub)
+    }
 }
 
 fn ok_request() -> NewInvoiceRequest {
     NewInvoiceRequest {
-        wallet_id: WalletId::new(),
+        wallet_id: WalletId::from(Uuid::now_v7()),
         amount_msat: MilliSatoshi::new(1_000_000),
         expiry_seconds: 3600,
         memo: Some("test".to_owned()),
@@ -49,7 +77,9 @@ fn ok_request() -> NewInvoiceRequest {
 async fn create_invoice_persists_invoice_and_event_rows() {
     let db = TestDatabase::new().await.expect("test db");
     let pool = db.pool.clone();
-    let app = App::new(pool.clone(), Arc::new(CannedOkLnd));
+    let outbox = EventPublisher::new(&pool);
+    let symphony: Arc<dyn SymphonyClient> = Arc::new(LightningSymphonyClient::new(""));
+    let app = App::new(pool.clone(), Arc::new(CannedOkLnd), outbox, symphony);
 
     let invoice = app.create_invoice(ok_request()).await.expect("create");
     assert_eq!(invoice.payment_hash, PaymentHash::from([0xab; 32]));
@@ -73,7 +103,9 @@ async fn create_invoice_persists_invoice_and_event_rows() {
 async fn create_invoice_propagates_invoice_error() {
     let db = TestDatabase::new().await.expect("test db");
     let pool = db.pool.clone();
-    let app = App::new(pool, Arc::new(CannedOkLnd));
+    let outbox = EventPublisher::new(&pool);
+    let symphony: Arc<dyn SymphonyClient> = Arc::new(LightningSymphonyClient::new(""));
+    let app = App::new(pool.clone(), Arc::new(CannedOkLnd), outbox, symphony);
     let mut bad = ok_request();
     // Zero amount is the only condition that surfaces as `InvoiceError`
     // through `try_new`. Out-of-range expiry would be silently coerced
@@ -87,7 +119,9 @@ async fn create_invoice_propagates_invoice_error() {
 async fn create_invoice_propagates_lnd_error() {
     let db = TestDatabase::new().await.expect("test db");
     let pool = db.pool.clone();
-    let app = App::new(pool, Arc::new(CannedErrLnd));
+    let outbox = EventPublisher::new(&pool);
+    let symphony: Arc<dyn SymphonyClient> = Arc::new(LightningSymphonyClient::new(""));
+    let app = App::new(pool.clone(), Arc::new(CannedErrLnd), outbox, symphony);
     let err = app.create_invoice(ok_request()).await.unwrap_err();
     assert!(matches!(err, AppError::Lnd(_)));
 }

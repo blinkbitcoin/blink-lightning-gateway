@@ -17,8 +17,13 @@ use serde_json::json;
 
 use blink_lightning_gateway::api::graphql::{build_schema, GatewaySchema};
 use blink_lightning_gateway::app::App;
-use blink_lightning_gateway::lnd::{AddInvoiceParams, AddInvoiceResponse, LndApi, LndError};
+use blink_lightning_gateway::lnd::{
+    AddInvoiceParams, AddInvoiceResponse, FeeProbeParams, FeeProbeResponse, LndApi, LndError,
+    SendPaymentParams, SendPaymentResponse,
+};
+use blink_lightning_gateway::outbox::EventPublisher;
 use blink_lightning_gateway::primitives::{BoltInvoice, PaymentHash};
+use blink_lightning_gateway::symphony::{LightningSymphonyClient, SymphonyClient};
 
 use crate::common::TestDatabase;
 
@@ -37,6 +42,17 @@ impl LndApi for CannedLnd {
             payment_hash: PaymentHash::from(self.canned_payment_hash),
             bolt_invoice: BoltInvoice::new(self.canned_bolt_invoice),
         })
+    }
+
+    async fn send_payment(
+        &self,
+        _params: SendPaymentParams,
+    ) -> Result<SendPaymentResponse, LndError> {
+        Err(LndError::Stub)
+    }
+
+    async fn fee_probe(&self, _params: FeeProbeParams) -> Result<FeeProbeResponse, LndError> {
+        Err(LndError::Stub)
     }
 }
 
@@ -68,7 +84,9 @@ async fn ln_invoice_create_persists_invoice_and_event_rows() {
         canned_payment_hash: [0xaa; 32],
         canned_bolt_invoice: "lnbc10n1pj1234testbolt11invoice",
     });
-    let app = App::new(pool.clone(), lnd);
+    let outbox = EventPublisher::new(&pool);
+    let symphony: Arc<dyn SymphonyClient> = Arc::new(LightningSymphonyClient::new(""));
+    let app = App::new(pool.clone(), lnd, outbox, symphony);
     let schema = build_test_schema(app);
 
     let wallet_id = "11111111-1111-1111-1111-111111111111";

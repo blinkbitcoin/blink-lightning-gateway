@@ -8,13 +8,14 @@ use blink_lightning_gateway::invoice::Invoices;
 use blink_lightning_gateway::primitives::{
     BoltInvoice, MilliSatoshi, PaymentHash, Timestamp, WalletId,
 };
+use uuid::Uuid;
 
 use crate::common::TestDatabase;
 
 fn ok_new_invoice() -> NewInvoice {
     NewInvoice::try_new(
         PaymentHash::from([0xaa; 32]),
-        WalletId::new(),
+        WalletId::from(Uuid::now_v7()),
         MilliSatoshi::new(1_000_000),
         3600,
         BoltInvoice::new("lnbc1u1pj..."),
