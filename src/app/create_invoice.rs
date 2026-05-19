@@ -35,20 +35,13 @@ impl App {
             ));
         }
 
-        let mut tx = self.pool.begin().await?;
         let invoice = self
             .invoices
-            .create_in_op(&mut tx, new_invoice)
+            .create(new_invoice)
             .await
             .map_err(crate::invoice::InvoiceError::from)?;
-        tx.commit().await?;
 
-        // Story 2.3: spawn the per-hash `subscribe_invoice` listener now
-        // that the row + event are durable. Idempotent against double-
-        // spawn (the recovery sweep may have already covered this hash
-        // if create_invoice ran during shutdown). Spawn failure logs at
-        // WARN but does NOT fail the mutation — the listener becomes a
-        // recovery-sweep target on next restart.
+        // Spawn the per-hash `subscribe_invoice` listener
         self.invoice_dispatcher
             .spawn_listener_for(invoice.payment_hash);
 

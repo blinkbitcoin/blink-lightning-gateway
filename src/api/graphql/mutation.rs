@@ -4,7 +4,6 @@
 //! (architecture L348).
 
 use async_graphql::{Context, Object};
-use es_entity::EsEntity;
 
 use super::types::{
     GraphqlError, LnInvoice, LnInvoiceCreateInput, LnInvoiceFeeProbeInput, LnInvoicePayload,
@@ -46,19 +45,7 @@ impl Mutation {
                 errors: Vec::new(),
                 invoice: Some(LnInvoice {
                     payment_hash: GqlPaymentHash(invoice.payment_hash),
-                    payment_request: LnPaymentRequest(
-                        invoice
-                            .events()
-                            .iter_all()
-                            .filter_map(|ev| match ev {
-                                crate::invoice::InvoiceEvent::Created { bolt_invoice, .. } => {
-                                    Some(bolt_invoice.as_str().to_owned())
-                                }
-                                _ => None,
-                            })
-                            .next()
-                            .unwrap_or_default(),
-                    ),
+                    payment_request: LnPaymentRequest(invoice.bolt_invoice.as_str().to_owned()),
                     payment_secret: LnPaymentSecret(String::new()),
                     satoshis: SatAmount(invoice.amount_msat.as_u64() / 1000),
                 }),

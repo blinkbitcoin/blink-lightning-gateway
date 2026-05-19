@@ -169,6 +169,7 @@ pub struct Invoice {
     pub wallet_id: WalletId,
     pub amount_msat: MilliSatoshi,
     pub expiry_at: Timestamp,
+    pub bolt_invoice: BoltInvoice,
     pub state: InvoiceState,
     pub created_at: Timestamp,
     pub payment_preimage: Option<Preimage>,
@@ -273,6 +274,7 @@ impl fmt::Debug for Invoice {
             .field("wallet_id", &self.wallet_id)
             .field("amount_msat", &self.amount_msat)
             .field("expiry_at", &self.expiry_at)
+            .field("bolt_invoice", &self.bolt_invoice)
             .field("state", &self.state)
             .field("created_at", &self.created_at)
             .field("payment_preimage", &self.payment_preimage)
@@ -291,8 +293,8 @@ impl TryFromEvents<InvoiceEvent> for Invoice {
             wallet_id,
             amount_msat,
             expiry_at,
+            bolt_invoice,
             created_at,
-            ..
         } = first
         else {
             ::tracing::error!(
@@ -336,6 +338,7 @@ impl TryFromEvents<InvoiceEvent> for Invoice {
             wallet_id: *wallet_id,
             amount_msat: *amount_msat,
             expiry_at: *expiry_at,
+            bolt_invoice: bolt_invoice.clone(),
             state,
             created_at: *created_at,
             payment_preimage,
