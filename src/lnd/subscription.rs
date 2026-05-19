@@ -106,16 +106,38 @@ async fn drive_stream(
                 let Some(payment) = msg? else {
                     return Ok(());
                 };
+                let raw_hash = payment.payment_hash.clone();
+                let raw_status = payment.status;
                 let update = match payment_to_update(payment) {
                     Ok(u) => u,
+                    Err(LndError::InvalidResponse(msg))
+                        if msg.contains("PaymentStatus") =>
+                    {
+                        warn!(
+                            payment_hash = %raw_hash,
+                            status = raw_status,
+                            error = %msg,
+                            "subscribe_payments: unknown LND PaymentStatus; skipping update"
+                        );
+                        continue;
+                    }
                     Err(e) => {
-                        warn!(error = %e, "subscribe_payments: skipped unmappable LND payment");
+                        warn!(
+                            payment_hash = %raw_hash,
+                            error = %e,
+                            "subscribe_payments: unparsable LND payment fields; skipping update"
+                        );
                         continue;
                     }
                 };
-                if tx.send(update).await.is_err() {
-                    info!("subscribe_payments: receiver dropped; exiting stream loop");
-                    return Ok(());
+                tokio::select! {
+                    _ = cancel.cancelled() => return Ok(()),
+                    res = tx.send(update) => {
+                        if res.is_err() {
+                            info!("subscribe_payments: receiver dropped; exiting stream loop");
+                            return Ok(());
+                        }
+                    }
                 }
             }
         }

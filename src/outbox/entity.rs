@@ -336,7 +336,7 @@ mod tests {
     // Guards every arm of `GatewayDomainEvent::to_standardized`. The
     // mapping is hand-written match arms with no type-system enforcement,
     // so a swapped variant (e.g. Completed → Failed) would silently
-    // mis-route Symphony templates. Cheap to extend when a variant lands.
+    // misroute Symphony templates. Cheap to extend when a variant lands.
     #[test]
     fn domain_event_maps_to_standardized() {
         use GatewayDomainEvent as D;

@@ -57,12 +57,19 @@ fn make_test_bolt11() -> String {
     let payment_hash = sha256::Hash::from_slice(&PAYMENT_HASH_BYTES).unwrap();
     let payment_secret = PaymentSecret([0x11; 32]);
 
+    // Use the current system time + a 1h expiry so the `would_expire`
+    // guard in `decode_bolt11` (Story 2.2 review fix) does not reject
+    // the test invoice as expired.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap();
     InvoiceBuilder::new(Currency::Regtest)
         .description("ln-gateway slice 2 test".into())
         .payment_hash(payment_hash)
         .payment_secret(payment_secret)
         .amount_milli_satoshis(TEST_AMOUNT_MSAT)
-        .duration_since_epoch(std::time::Duration::from_secs(1_700_000_000))
+        .duration_since_epoch(now)
+        .expiry_time(std::time::Duration::from_secs(3600))
         .min_final_cltv_expiry_delta(144)
         .build_signed(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
         .unwrap()
@@ -397,20 +404,40 @@ async fn payment_send_happy_path_drives_outbox_into_symphony_stub() {
     assert_eq!(entries[0].template_name, "LIGHTNING_PAYMENT_INITIATED");
     assert_eq!(entries[1].template_name, "LIGHTNING_PAYMENT_OUT");
 
-    // The asymmetric-amounts reimbursement math: held = amount + max_fee;
-    // settled = amount + fees_paid; difference is the refund.
-    let amount_msat = TEST_AMOUNT_MSAT;
-    // amount_sat round-down loses the sub-sat fragment in
-    // amount_held_msat; reconstruct via amount_sat * 1000.
-    let amount_sat_msat = (amount_msat / 1000) * 1000;
-    let max_fee_msat =
-        blink_lightning_gateway::fees::LnFees::max_for(MilliSatoshi::new(amount_msat)).as_u64();
-    assert_eq!(entries[0].amount_held_msat, amount_sat_msat + max_fee_msat);
-    assert_eq!(entries[1].amount_held_msat, amount_sat_msat + max_fee_msat);
+    // Asymmetric-amounts reimbursement contract: held = amount + max_fee
+    // (PENDING-layer), settled = amount + fees_paid (SETTLED-layer); the
+    // delta is the implicit refund. With the msat-policy fix, `amount`
+    // is ceiling-rounded to whole sats at decode, so for the test's
+    // whole-sat `TEST_AMOUNT_MSAT` (100k sats = 100_000_000 msat) the
+    // outbox `amount_sat` field round-trips losslessly.
+    //
+    // These assertions use absolute expected values (not arithmetic that
+    // mirrors what the test rig just wrote) so a regression in the
+    // metadata's `max_fee_msat` source — say, the resolver setting it
+    // from the wrong place — would actually fail the test rather than
+    // tautologically re-deriving the same value.
+    const EXPECTED_MAX_FEE_MSAT: u64 = 500_000; // 0.5% of 100k sat = 500 sat = 500_000 msat
+    const EXPECTED_AMOUNT_MSAT: u64 = TEST_AMOUNT_MSAT;
+    assert_eq!(
+        blink_lightning_gateway::fees::LnFees::max_for(MilliSatoshi::new(TEST_AMOUNT_MSAT))
+            .as_u64(),
+        EXPECTED_MAX_FEE_MSAT,
+        "LnFees::max_for contract check"
+    );
+    assert_eq!(
+        entries[0].amount_held_msat,
+        EXPECTED_AMOUNT_MSAT + EXPECTED_MAX_FEE_MSAT,
+        "INITIATED hold = amount + max_fee"
+    );
+    assert_eq!(
+        entries[1].amount_held_msat,
+        EXPECTED_AMOUNT_MSAT + EXPECTED_MAX_FEE_MSAT,
+        "OUT hold carries the prior max_fee"
+    );
     assert_eq!(
         entries[1].amount_settled_msat,
-        Some(amount_sat_msat + TEST_FEES_PAID_MSAT),
-        "settled is amount + actual fee (implicit refund of max_fee - actual_fee)"
+        Some(EXPECTED_AMOUNT_MSAT + TEST_FEES_PAID_MSAT),
+        "OUT settled = amount + actual fee (implicit refund of max_fee - actual_fee)"
     );
 
     cancel_token.cancel();

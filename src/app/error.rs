@@ -1,7 +1,7 @@
 //! `AppError` — application-service error type. `anyhow::Error` is
 //! permitted at this boundary per ADR #1; typed variants are preferred
 //! for predictable matching at gRPC/GraphQL surfaces. The gRPC `Status`
-//! mapping lives at `src/api/error.rs`.
+//! mapping lives at `src/api/grpc/error.rs`.
 
 use thiserror::Error;
 

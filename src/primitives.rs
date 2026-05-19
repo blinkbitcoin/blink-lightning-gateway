@@ -11,6 +11,7 @@ pub mod ids;
 pub mod milli_satoshi;
 pub mod payment_hash;
 pub mod preimage;
+pub mod pubkey;
 pub mod timestamp;
 
 pub use bolt_invoice::BoltInvoice;
@@ -18,4 +19,5 @@ pub use ids::{InvoiceId, PaymentId, WalletId};
 pub use milli_satoshi::{MilliSatoshi, MilliSatoshiError, Satoshis};
 pub use payment_hash::{PaymentHash, PaymentHashError};
 pub use preimage::{Preimage, PreimageError};
+pub use pubkey::{Pubkey, PubkeyError};
 pub use timestamp::Timestamp;

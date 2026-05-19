@@ -2,14 +2,25 @@
 
 use lightning_invoice::Bolt11Invoice;
 use std::str::FromStr;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::app::AppError;
 use crate::payment::entity::DecodedInvoice;
+use crate::payment::PaymentError;
 use crate::primitives::{BoltInvoice, MilliSatoshi, PaymentHash};
 
 pub fn decode_bolt11(payment_request: &str) -> Result<DecodedInvoice, AppError> {
     let invoice = Bolt11Invoice::from_str(payment_request)
         .map_err(|e| AppError::InvalidBoltInvoice(e.to_string()))?;
+
+    // Expiry check — refuse to send against an already-expired invoice
+    // rather than orphan a `Pending` row that LND would reject.
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    if invoice.would_expire(now) {
+        return Err(AppError::Payment(PaymentError::ExpiredBoltInvoice));
+    }
 
     let hash_slice: &[u8] = invoice.payment_hash().as_ref();
     let hash_bytes: [u8; 32] = hash_slice
@@ -24,7 +35,17 @@ pub fn decode_bolt11(payment_request: &str) -> Result<DecodedInvoice, AppError> 
         .map(|pk| hex::encode(pk.serialize()))
         .unwrap_or_default();
 
-    let amount_msat = invoice.amount_milli_satoshis().map(MilliSatoshi::new);
+    // Ceiling-round sub-sat msat amounts to the next whole sat — mirrors
+    // blink-core's `safe_tokens` (`blink/core/api/src/domain/bitcoin/
+    // lightning/ln-invoice.ts:32-33`). The aggregate's `amount_msat`
+    // field then only ever holds whole-sat multiples, so the outbox
+    // `amount_sat` and Symphony `sat_amount` (both `msat / 1000`) are
+    // lossless. The user is over-held by at most ~1 sat for an invoice
+    // that happens to carry sub-sat fragments.
+    let amount_msat = invoice
+        .amount_milli_satoshis()
+        .map(MilliSatoshi::new)
+        .map(MilliSatoshi::round_up_to_sat);
 
     Ok(DecodedInvoice {
         payment_hash,
@@ -43,17 +64,23 @@ mod tests {
     use std::time::Duration;
 
     /// Build a signed regtest BOLT11. `amount_msat = None` produces an
-    /// amountless invoice.
+    /// amountless invoice. Uses the current system time + a 1h expiry so
+    /// the `would_expire` guard in `decode_bolt11` does not reject the
+    /// test invoice (the guard was added during Story 2.2 review).
     fn make_test_bolt11(amount_msat: Option<u64>, payment_hash_bytes: [u8; 32]) -> String {
         let private_key = SecretKey::from_slice(&[0x42; 32]).unwrap();
         let payment_hash = sha256::Hash::from_slice(&payment_hash_bytes).unwrap();
         let payment_secret = PaymentSecret([0x11; 32]);
 
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap();
         let base = InvoiceBuilder::new(Currency::Regtest)
             .description("decode-test".into())
             .payment_hash(payment_hash)
             .payment_secret(payment_secret)
-            .duration_since_epoch(Duration::from_secs(1_700_000_000))
+            .duration_since_epoch(now)
+            .expiry_time(Duration::from_secs(3600))
             .min_final_cltv_expiry_delta(144);
 
         let signed = match amount_msat {
@@ -75,6 +102,17 @@ mod tests {
         assert_eq!(decoded.payment_hash, PaymentHash::from([0xcc; 32]));
         assert_eq!(decoded.amount_msat, Some(MilliSatoshi::new(100_000_000)));
         assert_eq!(decoded.bolt_invoice.as_str(), &bolt11);
+    }
+
+    #[test]
+    fn sub_sat_invoice_amount_is_ceil_rounded_to_whole_sat() {
+        // BOLT11 amounts can express msat-precise values; decode rounds up
+        // to the nearest whole sat so the aggregate's `amount_msat` field
+        // only ever holds whole-sat multiples (avoids hold/release msat
+        // mismatches at the Symphony boundary).
+        let bolt11 = make_test_bolt11(Some(1), [0x01; 32]);
+        let decoded = decode_bolt11(&bolt11).unwrap();
+        assert_eq!(decoded.amount_msat, Some(MilliSatoshi::new(1000)));
     }
 
     #[test]

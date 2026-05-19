@@ -11,8 +11,8 @@ use super::types::{
     LnInvoicePaymentInput, LnPaymentRequest, LnPaymentSecret, PaymentHash as GqlPaymentHash,
     PaymentSendPayload, PaymentSendResult, SatAmount, SatAmountPayload,
 };
-use crate::app::{App, FeeProbeRequest, NewInvoiceRequest, SendPaymentRequest};
-use crate::payment::PaymentState;
+use crate::app::{App, AppError, FeeProbeRequest, NewInvoiceRequest, SendPaymentRequest};
+use crate::payment::{PaymentError, PaymentState};
 
 pub struct Mutation;
 
@@ -86,14 +86,10 @@ impl Mutation {
 
         match app.send_payment(request).await {
             Ok(payment) => {
-                // Slice-2 returns `Pending` for the synchronous-`InFlight`
-                // path and `Success` for the rare synchronous-success
-                // path. `Failure` rides through the resolver `Err` branch.
                 let status = match payment.state {
                     PaymentState::Pending | PaymentState::Initiated => PaymentSendResult::Pending,
                     PaymentState::Completed => PaymentSendResult::Success,
-                    PaymentState::Failed => PaymentSendResult::Failure,
-                    PaymentState::Reversed => PaymentSendResult::Failure,
+                    PaymentState::Failed | PaymentState::Reversed => PaymentSendResult::Failure,
                 };
                 Ok(PaymentSendPayload {
                     errors: Vec::new(),
@@ -101,6 +97,11 @@ impl Mutation {
                     transaction: None,
                 })
             }
+            Err(AppError::Payment(PaymentError::AlreadyPaid { .. })) => Ok(PaymentSendPayload {
+                errors: Vec::new(),
+                status: Some(PaymentSendResult::AlreadyPaid),
+                transaction: None,
+            }),
             Err(e) => Ok(PaymentSendPayload {
                 errors: vec![GraphqlError::from_message(e.to_string())],
                 status: Some(PaymentSendResult::Failure),

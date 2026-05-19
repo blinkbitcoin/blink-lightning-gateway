@@ -277,8 +277,8 @@ pub struct LnInvoicePaymentInput {
 #[derive(InputObject)]
 #[graphql(name = "LnInvoiceFeeProbeInput")]
 pub struct LnInvoiceFeeProbeInput {
-    pub wallet_id: WalletId,
     pub payment_request: LnPaymentRequest,
+    pub wallet_id: WalletId,
 }
 
 /// Settled transaction record.

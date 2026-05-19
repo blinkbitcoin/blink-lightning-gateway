@@ -53,7 +53,7 @@ src/
 
 ## Conventions to follow
 
-- **Errors:** `thiserror` for typed errors in entity/repo/domain. `anyhow::Error` only at the application-service boundary. Never `panic!` / `unwrap()` in production paths. gRPC `Status` mapping centralized in `src/api/error.rs`.
+- **Errors:** `thiserror` for typed errors in entity/repo/domain. `anyhow::Error` only at the application-service boundary. Never `panic!` / `unwrap()` in production paths. gRPC `Status` mapping centralized in `src/api/grpc/error.rs`.
 - **Logging:** `tracing` only (never `log`, never `println!`). Structured fields, not formatted strings: `tracing::info!(payment_hash = %hash, "settled")` — NOT `tracing::info!("settled {}", hash)`. Required fields on domain logs: `payment_hash`, `wallet_id`, `correlation_id`.
 - **Naming:** Aggregates singular, no `Ln` prefix (`Invoice`, not `LnInvoice`). gRPC service `LightningPaymentGatewayService`. Tables snake_case plural.
 - **Migration filenames: `<YYYYMMDDHHMMSS>_<name>.sql`.** Workspace-wide convention (sqlx `migrate!` reads the prefix as the version). bria, symphony, cala all use this. Generate via `date +%Y%m%d%H%M%S` or `cargo sqlx migrate add`.

@@ -1,6 +1,6 @@
 //! Centralized `tonic::Status` mapping for the gateway's gRPC surface.
 //!
-//! Per CLAUDE.md ("gRPC `Status` mapping centralized in `src/api/error.rs`")
+//! Per CLAUDE.md ("gRPC `Status` mapping centralized in `src/api/grpc/error.rs`")
 //! the gRPC layer must never construct a `Status` ad-hoc. Use the typed
 //! domain errors and let `From<...> for tonic::Status` here own the
 //! status-code choice and the operator-facing message.
@@ -40,6 +40,16 @@ impl From<AppError> for Status {
         match err {
             AppError::WalletOwnership(msg) => Status::permission_denied(msg),
             AppError::Invoice(inner) => Status::invalid_argument(inner.to_string()),
+            // PaymentError covers a mix of caller-visible validation
+            // failures and infra/concurrency failures wrapped via
+            // `EsRepoError`. Surface the latter as `unavailable` (the
+            // gRPC contract for retryable errors) so a transient DB
+            // hiccup or ConcurrentModification doesn't look like client
+            // misuse.
+            AppError::Payment(crate::payment::PaymentError::EsRepo(inner)) => {
+                ::tracing::error!(error = %inner, "payment EsRepo error surfaced to gRPC layer");
+                Status::unavailable(inner.to_string())
+            }
             AppError::Payment(inner) => Status::invalid_argument(inner.to_string()),
             AppError::InvalidBoltInvoice(msg) => {
                 Status::invalid_argument(format!("invalid bolt invoice: {msg}"))

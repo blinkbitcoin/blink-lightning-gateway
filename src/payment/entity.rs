@@ -175,26 +175,38 @@ impl Payment {
 
     /// Transition `Initiated → Pending` on LND `IN_FLIGHT`.
     ///
-    /// Idempotent on a prior `Pending` event (duplicate IN_FLIGHT
-    /// replay). A prior `Completed` / `Failed` / `Reversed` event is a
-    /// state-regression claim — LND saying "still in flight" for a
-    /// payment we've already determined to be in a terminal state — and
-    /// surfaces as `InvalidStateTransition` rather than being silently
-    /// ignored.
-    pub fn mark_pending(
-        &mut self,
-        sent_at: Timestamp,
-    ) -> Result<Idempotent<()>, PaymentError> {
-        idempotency_guard!(self.events.iter_all().rev(), PaymentEvent::Pending { .. });
-        if !matches!(self.state, PaymentState::Initiated) {
-            return Err(PaymentError::InvalidStateTransition {
-                from: self.state,
-                attempted: "mark_pending",
-            });
+    /// Idempotent on a prior `Pending` event when the projected state is
+    /// still `Pending` (duplicate IN_FLIGHT replay). A prior `Completed`
+    /// / `Failed` / `Reversed` projection — even one whose log contains
+    /// a prior Pending event — is a state-regression claim and surfaces
+    /// as `InvalidStateTransition`. The terminal-state check runs BEFORE
+    /// the idempotency guard so a log of [Initiated, Pending, Failed]
+    /// receiving another IN_FLIGHT does not silently no-op.
+    pub fn mark_pending(&mut self, sent_at: Timestamp) -> Result<Idempotent<()>, PaymentError> {
+        match self.state {
+            PaymentState::Initiated => {
+                // First-time Pending — push the event and transition.
+                self.events.push(PaymentEvent::Pending { sent_at });
+                self.state = PaymentState::Pending;
+                Ok(Idempotent::Executed(()))
+            }
+            PaymentState::Pending => {
+                // Duplicate IN_FLIGHT replay — projection already Pending,
+                // log already contains the Pending event. No-op.
+                idempotency_guard!(self.events.iter_all().rev(), PaymentEvent::Pending { .. });
+                // Unreachable in practice (projection Pending implies the
+                // event is present); included for completeness.
+                self.events.push(PaymentEvent::Pending { sent_at });
+                self.state = PaymentState::Pending;
+                Ok(Idempotent::Executed(()))
+            }
+            PaymentState::Completed | PaymentState::Failed | PaymentState::Reversed => {
+                Err(PaymentError::InvalidStateTransition {
+                    from: self.state,
+                    attempted: "mark_pending",
+                })
+            }
         }
-        self.events.push(PaymentEvent::Pending { sent_at });
-        self.state = PaymentState::Pending;
-        Ok(Idempotent::Executed(()))
     }
 
     /// Transition `(Initiated|Pending) → Completed` on LND `SUCCEEDED`.
@@ -304,7 +316,13 @@ impl TryFromEvents<PaymentEvent> for Payment {
     fn try_from_events(events: EntityEvents<PaymentEvent>) -> Result<Self, EsEntityError> {
         let id = *events.id();
         let mut iter = events.iter_all();
-        let first = iter.next().ok_or(EsEntityError::NotFound)?;
+        let first = iter.next().ok_or_else(|| {
+            ::tracing::warn!(
+                payment_id = %id,
+                "payment event log is empty — treating as NotFound"
+            );
+            EsEntityError::NotFound
+        })?;
         let PaymentEvent::Initiated {
             payment_hash,
             wallet_id,
@@ -314,6 +332,10 @@ impl TryFromEvents<PaymentEvent> for Payment {
             ..
         } = first
         else {
+            ::tracing::error!(
+                payment_id = %id,
+                "payment event log does not start with Initiated — CORRUPT LOG; surfacing as NotFound"
+            );
             return Err(EsEntityError::NotFound);
         };
 
@@ -339,7 +361,12 @@ impl TryFromEvents<PaymentEvent> for Payment {
                 PaymentEvent::Failed { .. } => state = PaymentState::Failed,
                 PaymentEvent::Reversed { .. } => state = PaymentState::Reversed,
                 PaymentEvent::Initiated { .. } => {
-                    // Duplicate init — corrupt log.
+                    // Duplicate init — CORRUPT log. es-entity 0.9.5's
+                    // `EsEntityError` has no `CorruptEventLog` variant.
+                    ::tracing::error!(
+                        payment_id = %id,
+                        "payment event log contains duplicate Initiated — CORRUPT LOG; surfacing as NotFound"
+                    );
                     return Err(EsEntityError::NotFound);
                 }
             }

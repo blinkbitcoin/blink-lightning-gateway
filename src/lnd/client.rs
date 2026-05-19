@@ -32,9 +32,10 @@
 use async_trait::async_trait;
 use tonic_lnd::tonic::Streaming;
 use tonic_lnd::{lnrpc, routerrpc};
+use tracing::warn;
 
 use crate::payment::{FailureReason, Hop};
-use crate::primitives::{BoltInvoice, MilliSatoshi, PaymentHash, Preimage};
+use crate::primitives::{BoltInvoice, MilliSatoshi, PaymentHash, Preimage, Pubkey};
 
 use super::{
     config::LndConfig,
@@ -113,7 +114,7 @@ impl LndClient {
         }
     }
 
-    pub(super) fn is_connected(&self) -> bool {
+    pub fn is_connected(&self) -> bool {
         self.inner.is_some()
     }
 
@@ -225,11 +226,27 @@ pub(super) fn lnd_payment_to_send_response(
     payment: lnrpc::Payment,
 ) -> Result<SendPaymentResponse, LndError> {
     let payment_hash = parse_hex_payment_hash(&payment.payment_hash)?;
-    let payment_preimage = parse_hex_preimage(&payment.payment_preimage);
+    let payment_preimage = parse_preimage(&payment.payment_preimage, &payment.payment_hash);
     let status = map_payment_status(payment.status)?;
+    // LND has been observed to set `fee_msat` to negative (-1) on early
+    // Failed payments before fee accounting finalizes. Treat as 0 with a
+    // warn so the state transition still completes — the `status` field
+    // is the authoritative outcome, not `fee_msat`.
+    //
+    // Ceiling-round to whole-sat to mirror blink-core's `safe_fee`
+    // (`Math.ceil(fee_mtokens / 1000)` inside the `lightning` npm lib).
     let fees_paid_msat = MilliSatoshi::try_from(payment.fee_msat)
-        .map_err(|e| LndError::InvalidResponse(format!("payment.fee_msat: {e}")))?;
-    let route_hops = first_route_hops(&payment.htlcs);
+        .unwrap_or_else(|e| {
+            warn!(
+                payment_hash = %payment.payment_hash,
+                fee_msat = payment.fee_msat,
+                error = %e,
+                "LND payment.fee_msat invalid; defaulting to ZERO"
+            );
+            MilliSatoshi::ZERO
+        })
+        .round_up_to_sat();
+    let route_hops = first_route_hops(&payment.htlcs, &payment.payment_hash);
     let failure_reason = if status == SendPaymentStatus::Failed {
         Some(map_failure_reason_to_typed(payment.failure_reason))
     } else {
@@ -250,11 +267,35 @@ fn parse_hex_payment_hash(s: &str) -> Result<PaymentHash, LndError> {
         .map_err(|e| LndError::InvalidResponse(format!("payment.payment_hash: {e}")))
 }
 
-fn parse_hex_preimage(s: &str) -> Option<Preimage> {
-    if s.len() != 64 {
+/// Parse LND `Payment.payment_preimage`. Empty string → `None` (in-flight).
+/// 64-char hex → `Some(Preimage)`. Anything else is a wire-level anomaly:
+/// returns `None` and warns with the offending bytes so the caller can
+/// distinguish "absent" from "garbage" (a `Succeeded` payment with `None`
+/// here is a hard error at the call site).
+fn parse_preimage(s: &str, payment_hash_hex: &str) -> Option<Preimage> {
+    if s.is_empty() {
         return None;
     }
-    s.parse().ok()
+    if s.len() != 64 {
+        warn!(
+            payment_hash = %payment_hash_hex,
+            preimage_len = s.len(),
+            "LND payment.payment_preimage wrong length (expected 64 hex chars)"
+        );
+        return None;
+    }
+    match s.parse() {
+        Ok(p) => Some(p),
+        Err(e) => {
+            warn!(
+                payment_hash = %payment_hash_hex,
+                error = %e,
+                preimage_hex = %s,
+                "LND payment.payment_preimage not hex"
+            );
+            None
+        }
+    }
 }
 
 fn map_payment_status(value: i32) -> Result<SendPaymentStatus, LndError> {
@@ -296,7 +337,7 @@ fn map_failure_reason_to_typed(value: i32) -> FailureReason {
     }
 }
 
-fn first_route_hops(htlcs: &[lnrpc::HtlcAttempt]) -> Vec<Hop> {
+fn first_route_hops(htlcs: &[lnrpc::HtlcAttempt], payment_hash_hex: &str) -> Vec<Hop> {
     htlcs
         .iter()
         .find_map(|h| h.route.as_ref())
@@ -304,13 +345,37 @@ fn first_route_hops(htlcs: &[lnrpc::HtlcAttempt]) -> Vec<Hop> {
             route
                 .hops
                 .iter()
-                .map(|hop| Hop {
-                    pub_key: hop.pub_key.clone(),
-                    channel_id: hop.chan_id,
-                    fee_msat: MilliSatoshi::try_from(hop.fee_msat).unwrap_or(MilliSatoshi::ZERO),
-                    amt_msat: MilliSatoshi::try_from(hop.amt_to_forward_msat)
-                        .unwrap_or(MilliSatoshi::ZERO),
-                    expiry: hop.expiry,
+                .filter_map(|hop| {
+                    // Skip hops with unparsable pubkeys rather than storing
+                    // garbage; route_hops is advisory and a missing hop is
+                    // less harmful than one with a bogus identity.
+                    let pub_key = match hop.pub_key.parse::<Pubkey>() {
+                        Ok(p) => p,
+                        Err(e) => {
+                            warn!(
+                                payment_hash = %payment_hash_hex,
+                                error = %e,
+                                pubkey_hex = %hop.pub_key,
+                                "LND hop.pub_key not parseable; skipping hop"
+                            );
+                            return None;
+                        }
+                    };
+                    Some(Hop {
+                        pub_key,
+                        channel_id: hop.chan_id,
+                        // Ceiling-round to whole-sat for consistency with the
+                        // top-level `fees_paid_msat` invariant — hops are
+                        // advisory but the unit should match downstream
+                        // consumers' sat-resolution expectations.
+                        fee_msat: MilliSatoshi::try_from(hop.fee_msat)
+                            .unwrap_or(MilliSatoshi::ZERO)
+                            .round_up_to_sat(),
+                        amt_msat: MilliSatoshi::try_from(hop.amt_to_forward_msat)
+                            .unwrap_or(MilliSatoshi::ZERO)
+                            .round_up_to_sat(),
+                        expiry: hop.expiry,
+                    })
                 })
                 .collect()
         })

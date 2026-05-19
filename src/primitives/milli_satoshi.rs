@@ -40,6 +40,21 @@ impl MilliSatoshi {
     pub const fn as_u64(self) -> u64 {
         self.0
     }
+
+    /// Ceiling-round to whole-sat (output is always a multiple of 1000).
+    /// Called at BOLT11 decode so `Payment.amount_msat` only ever holds
+    /// whole-sat values — downstream sat conversions are then lossless.
+    /// Mirrors blink-core's `safe_tokens` ceiling.
+    pub const fn round_up_to_sat(self) -> Self {
+        Self(self.0.div_ceil(1000) * 1000)
+    }
+
+    /// Truncating divide to whole satoshis. Only safe to call when the
+    /// invariant "self is a multiple of 1000" holds — i.e. after a
+    /// `round_up_to_sat`.
+    pub const fn whole_sat(self) -> u64 {
+        self.0 / 1000
+    }
 }
 
 impl fmt::Display for MilliSatoshi {
@@ -171,5 +186,44 @@ mod tests {
         assert_eq!(json, "123456");
         let back: MilliSatoshi = serde_json::from_str(&json).unwrap();
         assert_eq!(back, m);
+    }
+
+    #[test]
+    fn round_up_to_sat_rounds_up_sub_sat() {
+        // Sub-sat msat round up to the next whole sat (1000 msat).
+        assert_eq!(
+            MilliSatoshi::new(1).round_up_to_sat(),
+            MilliSatoshi::new(1000)
+        );
+        assert_eq!(
+            MilliSatoshi::new(999).round_up_to_sat(),
+            MilliSatoshi::new(1000)
+        );
+        assert_eq!(
+            MilliSatoshi::new(1001).round_up_to_sat(),
+            MilliSatoshi::new(2000)
+        );
+    }
+
+    #[test]
+    fn round_up_to_sat_preserves_whole_sat() {
+        // Whole-sat msat values are unchanged.
+        assert_eq!(MilliSatoshi::ZERO.round_up_to_sat(), MilliSatoshi::ZERO);
+        assert_eq!(
+            MilliSatoshi::new(1000).round_up_to_sat(),
+            MilliSatoshi::new(1000)
+        );
+        assert_eq!(
+            MilliSatoshi::new(100_000_000).round_up_to_sat(),
+            MilliSatoshi::new(100_000_000)
+        );
+    }
+
+    #[test]
+    fn whole_sat_truncates() {
+        // Only valid post-`round_up_to_sat`. Documents the lossy nature
+        // of using it on a non-whole-sat value.
+        assert_eq!(MilliSatoshi::new(1000).whole_sat(), 1);
+        assert_eq!(MilliSatoshi::new(999).whole_sat(), 0);
     }
 }

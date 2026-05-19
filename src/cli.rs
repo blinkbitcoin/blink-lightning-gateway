@@ -206,21 +206,20 @@ async fn run_cmd(config: Config) -> anyhow::Result<()> {
 
     // LND payment-subscription task. Forwards
     // `Router/TrackPayments` events into `App::handle_payment_update`.
-    // Boot-stub path: the task awaits cancellation without opening the
-    // stream and exits cleanly without reporting an error to the
-    // supervisor channel.
+    // The producer reports its exit reason to the supervisor channel
+    // (matching the gRPC/GraphQL/health tasks) so the supervisor knows
+    // when the subscription has gone dark — without that signal the
+    // gateway could keep serving `lnInvoicePaymentSend` while no
+    // subscription reconciles payments to terminal state.
     {
         let cancel = cancel.clone();
+        let send = send.clone();
         let app = app.clone();
         let lnd_for_sub = lnd_client.clone();
         let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(64);
         let cancel_for_sub = cancel.clone();
         info!("Starting LND payment-subscription task");
         handles.push(tokio::spawn(async move {
-            // Spawn the consumer side concurrently: each PaymentUpdate
-            // hands off to App::handle_payment_update. The producer
-            // (`subscribe_payments`) owns the stream; we drain its
-            // output here.
             let consumer_cancel = cancel_for_sub.clone();
             let app_for_consumer = app.clone();
             let consumer = tokio::spawn(async move {
@@ -236,12 +235,25 @@ async fn run_cmd(config: Config) -> anyhow::Result<()> {
                     }
                 }
             });
-            let _ = subscribe_payments(lnd_for_sub, update_tx, cancel_for_sub).await;
-            // Producer exited; let the consumer drain queued updates,
-            // then return.
+            let producer_result = subscribe_payments(lnd_for_sub, update_tx, cancel_for_sub).await;
             let _ = consumer.await;
-            warn!("LND payment-subscription task exited");
-            let _ = cancel;
+            // Translate the producer's outcome into the supervisor's
+            // channel. Cancellation is the expected exit; any other
+            // outcome — even Ok(()) — flags the subscription has gone
+            // dark and the binary should restart so kube reconnects.
+            let result =
+                if cancel.is_cancelled() {
+                    Ok(())
+                } else {
+                    match producer_result {
+                        Ok(()) => Err(anyhow::anyhow!(
+                            "LND payment-subscription producer exited without cancellation"
+                        )),
+                        Err(e) => Err(anyhow::Error::from(e)
+                            .context("LND payment-subscription producer error")),
+                    }
+                };
+            report_exit(&send, result);
         }));
     }
 

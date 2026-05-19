@@ -14,7 +14,7 @@ use es_entity::EsEvent;
 use serde::{Deserialize, Serialize};
 
 use crate::primitives::{
-    BoltInvoice, MilliSatoshi, PaymentHash, PaymentId, Preimage, Timestamp, WalletId,
+    BoltInvoice, MilliSatoshi, PaymentHash, PaymentId, Preimage, Pubkey, Timestamp, WalletId,
 };
 
 /// Reason an outbound payment failed. Mirrors LND's
@@ -40,15 +40,24 @@ impl FailureReason {
             Self::Other(_) => "Other",
         }
     }
+
+    /// Tag + detail. For `Other(s)`, returns `"Other: {s}"`; for typed
+    /// variants returns the same string as `as_str()`. Used in outbox
+    /// metadata so a Symphony / dashboard reader can see the underlying
+    /// LND failure reason instead of an opaque "Other" bucket.
+    pub fn detail_str(&self) -> String {
+        match self {
+            Self::Other(s) => format!("Other: {s}"),
+            other => other.as_str().to_owned(),
+        }
+    }
 }
 
 /// One hop on the route LND eventually used. Flat struct mirroring
-/// LND's `lnrpc.Hop` proto. `pub_key` carried as hex String here
-/// (rather than a typed `Pubkey`) because routing carries no
-/// per-hop pubkey validation requirements at the gateway boundary.
+/// LND's `lnrpc.Hop` proto. `pub_key` is a typed `Pubkey`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hop {
-    pub pub_key: String,
+    pub pub_key: Pubkey,
     pub channel_id: u64,
     pub fee_msat: MilliSatoshi,
     pub amt_msat: MilliSatoshi,
