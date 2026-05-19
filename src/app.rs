@@ -13,11 +13,13 @@ pub mod create_invoice;
 pub mod decode;
 pub mod error;
 pub mod fee_probe;
+pub mod handle_invoice_update;
 pub mod handle_payment_update;
 pub mod helpers;
 pub mod send_payment;
 
 pub use error::AppError;
+pub use handle_invoice_update::InvoiceUpdateDispatcher;
 
 use crate::invoice::Invoices;
 use crate::lnd::LndApi;
@@ -65,6 +67,7 @@ pub struct App {
     pub(crate) symphony: Arc<dyn SymphonyClient>,
     pub(crate) pool: PgPool,
     pub(crate) mode: Mode,
+    pub(crate) invoice_dispatcher: InvoiceUpdateDispatcher,
 }
 
 impl App {
@@ -73,6 +76,7 @@ impl App {
         lnd: Arc<dyn LndApi>,
         outbox: EventPublisher,
         symphony: Arc<dyn SymphonyClient>,
+        invoice_dispatcher: InvoiceUpdateDispatcher,
     ) -> Self {
         Self {
             invoices: Invoices::new(&pool),
@@ -82,6 +86,7 @@ impl App {
             symphony,
             pool,
             mode: Mode::Live,
+            invoice_dispatcher,
         }
     }
 
@@ -92,5 +97,13 @@ impl App {
 
     pub fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    /// Accessor used by `job::invoice_subscription_recovery_sweep`. The
+    /// repo is event-sourced and effectively read-only from outside the
+    /// per-use-case files; exposing it as `&Invoices` is safer than
+    /// duplicating the sweep logic onto `App`.
+    pub fn invoices(&self) -> &Invoices {
+        &self.invoices
     }
 }

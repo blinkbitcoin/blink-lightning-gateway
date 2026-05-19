@@ -50,10 +50,11 @@ impl Mutation {
                         invoice
                             .events()
                             .iter_all()
-                            .map(|ev| match ev {
+                            .filter_map(|ev| match ev {
                                 crate::invoice::InvoiceEvent::Created { bolt_invoice, .. } => {
-                                    bolt_invoice.as_str().to_owned()
+                                    Some(bolt_invoice.as_str().to_owned())
                                 }
+                                _ => None,
                             })
                             .next()
                             .unwrap_or_default(),

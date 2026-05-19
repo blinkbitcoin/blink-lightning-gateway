@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use blink_lightning_gateway::api::graphql::{build_schema, GatewaySchema};
-use blink_lightning_gateway::app::App;
+use blink_lightning_gateway::app::{App, InvoiceUpdateDispatcher};
 use blink_lightning_gateway::lnd::{
     AddInvoiceParams, AddInvoiceResponse, FeeProbeParams, FeeProbeResponse, LndApi, LndError,
     SendPaymentParams, SendPaymentResponse,
@@ -86,7 +86,13 @@ async fn ln_invoice_create_persists_invoice_and_event_rows() {
     });
     let outbox = EventPublisher::new(&pool);
     let symphony: Arc<dyn SymphonyClient> = Arc::new(LightningSymphonyClient::new(""));
-    let app = App::new(pool.clone(), lnd, outbox, symphony);
+    let app = App::new(
+        pool.clone(),
+        lnd,
+        outbox,
+        symphony,
+        InvoiceUpdateDispatcher::for_test(),
+    );
     let schema = build_test_schema(app);
 
     let wallet_id = "11111111-1111-1111-1111-111111111111";

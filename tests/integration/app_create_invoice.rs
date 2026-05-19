@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use blink_lightning_gateway::app::{App, AppError, NewInvoiceRequest};
+use blink_lightning_gateway::app::{App, AppError, InvoiceUpdateDispatcher, NewInvoiceRequest};
 use blink_lightning_gateway::lnd::{
     AddInvoiceParams, AddInvoiceResponse, FeeProbeParams, FeeProbeResponse, LndApi, LndError,
     SendPaymentParams, SendPaymentResponse,
@@ -79,7 +79,13 @@ async fn create_invoice_persists_invoice_and_event_rows() {
     let pool = db.pool.clone();
     let outbox = EventPublisher::new(&pool);
     let symphony: Arc<dyn SymphonyClient> = Arc::new(LightningSymphonyClient::new(""));
-    let app = App::new(pool.clone(), Arc::new(CannedOkLnd), outbox, symphony);
+    let app = App::new(
+        pool.clone(),
+        Arc::new(CannedOkLnd),
+        outbox,
+        symphony,
+        InvoiceUpdateDispatcher::for_test(),
+    );
 
     let invoice = app.create_invoice(ok_request()).await.expect("create");
     assert_eq!(invoice.payment_hash, PaymentHash::from([0xab; 32]));
@@ -105,7 +111,13 @@ async fn create_invoice_propagates_invoice_error() {
     let pool = db.pool.clone();
     let outbox = EventPublisher::new(&pool);
     let symphony: Arc<dyn SymphonyClient> = Arc::new(LightningSymphonyClient::new(""));
-    let app = App::new(pool.clone(), Arc::new(CannedOkLnd), outbox, symphony);
+    let app = App::new(
+        pool.clone(),
+        Arc::new(CannedOkLnd),
+        outbox,
+        symphony,
+        InvoiceUpdateDispatcher::for_test(),
+    );
     let mut bad = ok_request();
     // Zero amount is the only condition that surfaces as `InvoiceError`
     // through `try_new`. Out-of-range expiry would be silently coerced
@@ -121,7 +133,13 @@ async fn create_invoice_propagates_lnd_error() {
     let pool = db.pool.clone();
     let outbox = EventPublisher::new(&pool);
     let symphony: Arc<dyn SymphonyClient> = Arc::new(LightningSymphonyClient::new(""));
-    let app = App::new(pool.clone(), Arc::new(CannedErrLnd), outbox, symphony);
+    let app = App::new(
+        pool.clone(),
+        Arc::new(CannedErrLnd),
+        outbox,
+        symphony,
+        InvoiceUpdateDispatcher::for_test(),
+    );
     let err = app.create_invoice(ok_request()).await.unwrap_err();
     assert!(matches!(err, AppError::Lnd(_)));
 }

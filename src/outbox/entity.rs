@@ -93,15 +93,22 @@ impl FromStr for GatewayEventType {
 
 /// Gateway-specific domain events.
 ///
-/// `LightningInvoiceSettled` fires on the inbound (Slice 1) flow;
-/// `LightningPaymentInitiated`/`Completed`/`Failed` land in Story 2.2
-/// for the symmetric outbound flow. `LightningPaymentReversed` is
-/// reserved (the entity-level `Reversed` transition exists but Slice 2
-/// does not fire it).
+/// `LightningInvoiceSettled` (Story 1.5 / Story 2.3 production trigger
+/// via the per-hash `subscribe_invoice` listener) names the wire event
+/// `is_confirmed`. Synonym: "Confirmed" — kept here for grep-ability.
+/// `LightningHtlcHeld` (Story 2.3) names `is_held`; maps to
+/// `IncomingPaymentPending`. `LightningInvoiceCanceled` (Story 2.3)
+/// names `is_canceled`; maps to `IncomingPaymentCanceled` and runs
+/// without a Cala template until Story 2.4 authors
+/// `LIGHTNING_INVOICE_CANCELED`.
+/// `LightningPaymentInitiated`/`Completed`/`Failed` (Story 2.2) handle
+/// the symmetric outbound flow; `LightningPaymentReversed` is reserved.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GatewayDomainEvent {
     LightningInvoiceSettled,
+    LightningHtlcHeld,
+    LightningInvoiceCanceled,
     LightningPaymentInitiated,
     LightningPaymentCompleted,
     LightningPaymentFailed,
@@ -112,6 +119,8 @@ impl GatewayDomainEvent {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::LightningInvoiceSettled => "lightning_invoice_settled",
+            Self::LightningHtlcHeld => "lightning_htlc_held",
+            Self::LightningInvoiceCanceled => "lightning_invoice_canceled",
             Self::LightningPaymentInitiated => "lightning_payment_initiated",
             Self::LightningPaymentCompleted => "lightning_payment_completed",
             Self::LightningPaymentFailed => "lightning_payment_failed",
@@ -123,6 +132,8 @@ impl GatewayDomainEvent {
     pub fn to_standardized(self) -> GatewayEventType {
         match self {
             Self::LightningInvoiceSettled => GatewayEventType::IncomingPaymentConfirmed,
+            Self::LightningHtlcHeld => GatewayEventType::IncomingPaymentPending,
+            Self::LightningInvoiceCanceled => GatewayEventType::IncomingPaymentCanceled,
             Self::LightningPaymentInitiated => GatewayEventType::OutgoingPaymentInitiated,
             Self::LightningPaymentCompleted => GatewayEventType::OutgoingPaymentCompleted,
             Self::LightningPaymentFailed => GatewayEventType::OutgoingPaymentFailed,
@@ -142,6 +153,8 @@ impl FromStr for GatewayDomainEvent {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "lightning_invoice_settled" => Ok(Self::LightningInvoiceSettled),
+            "lightning_htlc_held" => Ok(Self::LightningHtlcHeld),
+            "lightning_invoice_canceled" => Ok(Self::LightningInvoiceCanceled),
             "lightning_payment_initiated" => Ok(Self::LightningPaymentInitiated),
             "lightning_payment_completed" => Ok(Self::LightningPaymentCompleted),
             "lightning_payment_failed" => Ok(Self::LightningPaymentFailed),
@@ -327,6 +340,50 @@ impl NewOutboxEvent {
             gateway_metadata,
         )
     }
+
+    /// Construct a `LightningHtlcHeld` outbox row. Fires when LND's
+    /// per-hash `SubscribeSingleInvoice` reports `Accepted` (an HTLC
+    /// parked on a HOLD invoice). Maps to `IncomingPaymentPending`; the
+    /// Symphony `LIGHTNING_INVOICE_PENDING` template posts the
+    /// PENDING-layer hold for the held amount.
+    pub fn for_lightning_htlc_held(
+        correlation_id: impl Into<String>,
+        payment_hash_hex: impl Into<String>,
+        amount_sat: i64,
+        timestamp: DateTime<Utc>,
+        gateway_metadata: serde_json::Value,
+    ) -> Self {
+        Self::new(
+            GatewayDomainEvent::LightningHtlcHeld,
+            correlation_id,
+            payment_hash_hex,
+            amount_sat,
+            timestamp,
+            gateway_metadata,
+        )
+    }
+
+    /// Construct a `LightningInvoiceCanceled` outbox row. Fires when
+    /// LND emits `is_canceled`. Maps to `IncomingPaymentCanceled`. The
+    /// `LIGHTNING_INVOICE_CANCELED` Cala template is deferred to
+    /// Story 2.4; the outbox row still emits so a future Symphony-side
+    /// handler-routing arm can consume it.
+    pub fn for_lightning_invoice_canceled(
+        correlation_id: impl Into<String>,
+        payment_hash_hex: impl Into<String>,
+        amount_sat: i64,
+        timestamp: DateTime<Utc>,
+        gateway_metadata: serde_json::Value,
+    ) -> Self {
+        Self::new(
+            GatewayDomainEvent::LightningInvoiceCanceled,
+            correlation_id,
+            payment_hash_hex,
+            amount_sat,
+            timestamp,
+            gateway_metadata,
+        )
+    }
 }
 
 #[cfg(test)]
@@ -343,6 +400,8 @@ mod tests {
         use GatewayEventType as T;
         let cases = [
             (D::LightningInvoiceSettled, T::IncomingPaymentConfirmed),
+            (D::LightningHtlcHeld, T::IncomingPaymentPending),
+            (D::LightningInvoiceCanceled, T::IncomingPaymentCanceled),
             (D::LightningPaymentInitiated, T::OutgoingPaymentInitiated),
             (D::LightningPaymentCompleted, T::OutgoingPaymentCompleted),
             (D::LightningPaymentFailed, T::OutgoingPaymentFailed),
@@ -364,11 +423,19 @@ mod tests {
 
     #[test]
     fn domain_event_string_round_trip() {
-        let d = GatewayDomainEvent::LightningInvoiceSettled;
-        let s = d.to_string();
-        assert_eq!(s, "lightning_invoice_settled");
-        let back: GatewayDomainEvent = s.parse().unwrap();
-        assert_eq!(back, d);
+        for variant in [
+            GatewayDomainEvent::LightningInvoiceSettled,
+            GatewayDomainEvent::LightningHtlcHeld,
+            GatewayDomainEvent::LightningInvoiceCanceled,
+            GatewayDomainEvent::LightningPaymentInitiated,
+            GatewayDomainEvent::LightningPaymentCompleted,
+            GatewayDomainEvent::LightningPaymentFailed,
+            GatewayDomainEvent::LightningPaymentReversed,
+        ] {
+            let s = variant.to_string();
+            let back: GatewayDomainEvent = s.parse().unwrap();
+            assert_eq!(back, variant, "round-trip failed for {variant:?}");
+        }
     }
 
     #[test]

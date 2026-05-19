@@ -33,7 +33,7 @@ serde_yaml = "0.9"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 tonic-health = "0.14"
 anyhow = "1"
-tonic_lnd = { version = "0.4", package = "fedimint-tonic-lnd", features = ["lightningrpc", "routerrpc"] }
+tonic_lnd = { version = "0.4", package = "fedimint-tonic-lnd", features = ["lightningrpc", "routerrpc", "invoicesrpc"] }
 lightning-invoice = "0.33"
 
 [build-dependencies]

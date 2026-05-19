@@ -31,7 +31,7 @@ use tonic_health::pb::health_server::HealthServer;
 use tonic_health::server::{HealthReporter, HealthService};
 
 use blink_lightning_gateway::api::grpc::LightningPaymentGatewayService;
-use blink_lightning_gateway::app::App;
+use blink_lightning_gateway::app::{App, InvoiceUpdateDispatcher};
 use blink_lightning_gateway::health;
 use blink_lightning_gateway::lightning_payment_gateway::{
     lightning_payment_gateway_client::LightningPaymentGatewayClient,
@@ -148,7 +148,13 @@ async fn server_lifecycle_drains_in_flight_subscribers_on_cancel() {
     let lnd: Arc<dyn LndApi> = Arc::new(LndClient::boot_stub(LndConfig::stub()));
     let outbox = EventPublisher::new(&db.pool);
     let symphony: Arc<dyn SymphonyClient> = Arc::new(LightningSymphonyClient::new(""));
-    let app = App::new(db.pool.clone(), lnd, outbox, symphony);
+    let app = App::new(
+        db.pool.clone(),
+        lnd,
+        outbox,
+        symphony,
+        InvoiceUpdateDispatcher::for_test(),
+    );
     let graphql_config = SubgraphServerConfig {
         port: graphql_port,
         ..SubgraphServerConfig::default()

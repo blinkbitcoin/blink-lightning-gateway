@@ -43,6 +43,15 @@ impl App {
             .map_err(crate::invoice::InvoiceError::from)?;
         tx.commit().await?;
 
+        // Story 2.3: spawn the per-hash `subscribe_invoice` listener now
+        // that the row + event are durable. Idempotent against double-
+        // spawn (the recovery sweep may have already covered this hash
+        // if create_invoice ran during shutdown). Spawn failure logs at
+        // WARN but does NOT fail the mutation — the listener becomes a
+        // recovery-sweep target on next restart.
+        self.invoice_dispatcher
+            .spawn_listener_for(invoice.payment_hash);
+
         Ok(invoice)
     }
 }

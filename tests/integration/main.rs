@@ -5,6 +5,7 @@
 mod common;
 
 mod app_create_invoice;
+mod incoming_invoice_subscription;
 mod invoice_consumer_flow;
 mod invoice_create_producer_flow;
 mod invoice_repo;

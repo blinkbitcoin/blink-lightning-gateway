@@ -23,7 +23,7 @@ use tonic::transport::{Channel, Server};
 
 use blink_lightning_gateway::api::graphql::{build_schema, GatewaySchema};
 use blink_lightning_gateway::api::grpc::LightningPaymentGatewayService;
-use blink_lightning_gateway::app::App;
+use blink_lightning_gateway::app::{App, InvoiceUpdateDispatcher};
 use blink_lightning_gateway::lightning_payment_gateway::{
     amount as proto_amount, lightning_payment_gateway_client::LightningPaymentGatewayClient,
     lightning_payment_gateway_server::LightningPaymentGatewayServer, GatewayEventType,
@@ -245,7 +245,13 @@ async fn payment_send_happy_path_drives_outbox_into_symphony_stub() {
     let outbox = EventPublisher::new(&pool);
     let symphony_for_app: Arc<dyn SymphonyClient> = Arc::new(CannedSymphonyClient);
 
-    let app = App::new(pool.clone(), lnd, outbox, symphony_for_app);
+    let app = App::new(
+        pool.clone(),
+        lnd,
+        outbox,
+        symphony_for_app,
+        InvoiceUpdateDispatcher::for_test(),
+    );
     let schema = build_test_schema(app.clone());
 
     // ── Stand up the gRPC server before triggering the producer so the

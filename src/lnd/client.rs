@@ -31,7 +31,7 @@
 
 use async_trait::async_trait;
 use tonic_lnd::tonic::Streaming;
-use tonic_lnd::{lnrpc, routerrpc};
+use tonic_lnd::{invoicesrpc, lnrpc, routerrpc};
 use tracing::warn;
 
 use crate::payment::{FailureReason, Hop};
@@ -131,6 +131,27 @@ impl LndClient {
             .router()
             .track_payments(routerrpc::TrackPaymentsRequest {
                 no_inflight_updates: false,
+            })
+            .await?
+            .into_inner();
+        Ok(stream)
+    }
+
+    /// Open the per-hash `Invoices/SubscribeSingleInvoice` stream. Used
+    /// by `subscribe_invoice` in `invoice.rs`. Returns `LndError::Stub`
+    /// if this client was constructed via `boot_stub`. `SubscribeSingleInvoice`
+    /// always emits the current invoice state on subscribe (per
+    /// `invoices.proto:31-35`) — that's what makes the recovery sweep
+    /// work for invoices that transitioned during outage.
+    pub async fn subscribe_single_invoice_stream(
+        &self,
+        payment_hash: PaymentHash,
+    ) -> Result<Streaming<lnrpc::Invoice>, LndError> {
+        let mut inner = self.require_inner()?;
+        let stream = inner
+            .invoices()
+            .subscribe_single_invoice(invoicesrpc::SubscribeSingleInvoiceRequest {
+                r_hash: payment_hash.as_bytes().to_vec(),
             })
             .await?
             .into_inner();

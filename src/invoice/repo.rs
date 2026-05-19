@@ -46,4 +46,24 @@ impl Invoices {
     pub fn new(pool: &PgPool) -> Self {
         Self { pool: pool.clone() }
     }
+
+    /// Return every invoice in a non-terminal state — used by Story 2.3's
+    /// `invoice_subscription_recovery_sweep` to re-spawn per-hash
+    /// listeners after a gateway restart. Hand-rolled rather than
+    /// reaching for the cursor-paginated `list_*` methods (those don't
+    /// accept a state filter and the open-invoice set is small in dev
+    /// scope).
+    pub async fn list_open_invoices(&self) -> Result<Vec<Invoice>, super::InvoiceError> {
+        let rows = sqlx::query!(r#"SELECT id FROM invoices WHERE state IN ('pending', 'held')"#)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(es_entity::EsRepoError::Sqlx)?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let invoice = self.find_by_id(InvoiceId::from(row.id)).await?;
+            out.push(invoice);
+        }
+        Ok(out)
+    }
 }

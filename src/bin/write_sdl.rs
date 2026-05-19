@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use blink_lightning_gateway::api::graphql::build_schema;
-use blink_lightning_gateway::app::App;
+use blink_lightning_gateway::app::{App, InvoiceUpdateDispatcher};
 use blink_lightning_gateway::lnd::{
     AddInvoiceParams, AddInvoiceResponse, FeeProbeParams, FeeProbeResponse, LndApi, LndError,
     SendPaymentParams, SendPaymentResponse,
@@ -53,7 +53,13 @@ async fn main() {
 
     let outbox = EventPublisher::new(&pool);
     let symphony: Arc<dyn SymphonyClient> = Arc::new(LightningSymphonyClient::new(""));
-    let app = App::new(pool, Arc::new(StubLnd), outbox, symphony);
+    let app = App::new(
+        pool,
+        Arc::new(StubLnd),
+        outbox,
+        symphony,
+        InvoiceUpdateDispatcher::for_test(),
+    );
     let schema = build_schema(app);
     println!("{}", schema.sdl());
 }

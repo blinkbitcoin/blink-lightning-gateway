@@ -10,7 +10,10 @@ pub mod subscription;
 pub use client::{LndApi, LndClient};
 pub use config::LndConfig;
 pub use error::LndError;
-pub use invoice::{AddInvoiceParams, AddInvoiceResponse};
+pub use invoice::{
+    subscribe_invoice, AddInvoiceParams, AddInvoiceResponse, InvoiceUpdate, LndInvoiceState,
+    SubscribeInvoiceExit,
+};
 pub use payment::{
     FeeProbeParams, FeeProbeResponse, SendPaymentParams, SendPaymentResponse, SendPaymentStatus,
 };

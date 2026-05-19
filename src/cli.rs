@@ -17,10 +17,11 @@ use tonic_health::server::{HealthReporter, HealthService};
 use ::tracing::{info, warn};
 
 use crate::api::grpc::LightningPaymentGatewayService;
-use crate::app::App;
+use crate::app::{App, InvoiceUpdateDispatcher};
 use crate::cli::config::{Config, EnvOverride};
+use crate::job::invoice_subscription_recovery_sweep::run_invoice_subscription_recovery_sweep;
 use crate::lightning_payment_gateway::lightning_payment_gateway_server::LightningPaymentGatewayServer;
-use crate::lnd::{subscribe_payments, LndApi, LndClient, LndConfig};
+use crate::lnd::{subscribe_payments, InvoiceUpdate, LndApi, LndClient, LndConfig};
 use crate::outbox::EventPublisher;
 use crate::symphony::{LightningSymphonyClient, SymphonyClient};
 
@@ -137,9 +138,26 @@ async fn run_cmd(config: Config) -> anyhow::Result<()> {
         );
     }
 
-    let app = App::new(pool.clone(), lnd, outbox, symphony);
-
     let cancel = CancellationToken::new();
+
+    // Story 2.3: invoice-update dispatcher + consumer task. The
+    // dispatcher owns the LND handle + the shared mpsc Sender; threaded
+    // into `App::new` so `App::create_invoice` spawns a per-hash
+    // `subscribe_invoice` listener at invoice-creation time, and the
+    // recovery sweep re-spawns listeners for any open invoice at boot.
+    let (invoice_update_tx, mut invoice_update_rx) =
+        tokio::sync::mpsc::channel::<InvoiceUpdate>(64);
+    let invoice_dispatcher =
+        InvoiceUpdateDispatcher::new(lnd_client.clone(), invoice_update_tx, cancel.clone());
+
+    let app = App::new(
+        pool.clone(),
+        lnd,
+        outbox,
+        symphony,
+        invoice_dispatcher.clone(),
+    );
+
     let (send, mut receive) = tokio::sync::mpsc::channel::<anyhow::Result<()>>(1);
     let mut handles = Vec::new();
 
@@ -202,6 +220,42 @@ async fn run_cmd(config: Config) -> anyhow::Result<()> {
                 .context("HTTP health server error");
             report_exit(&send, result);
         }));
+    }
+
+    // Story 2.3: spawn the invoice-update consumer task. Fire-and-forget
+    // — not supervisor-tracked. It exits when `cancel.cancelled()` fires
+    // or when every sender on the mpsc has been dropped.
+    {
+        let consumer_cancel = cancel.clone();
+        let app_for_consumer = app.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = consumer_cancel.cancelled() => return,
+                    update = invoice_update_rx.recv() => {
+                        let Some(update) = update else { return; };
+                        if let Err(e) = app_for_consumer.handle_invoice_update(update).await {
+                            warn!(error = %e, "handle_invoice_update returned error");
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    // Story 2.3: run the boot-time recovery sweep. Re-spawns per-hash
+    // `subscribe_invoice` listeners for every open invoice. In boot-stub
+    // mode the listeners themselves are no-ops (`subscribe_invoice`
+    // awaits cancellation without opening a stream), but we still run
+    // the sweep so the dispatcher's bookkeeping reflects reality.
+    if lnd_client.is_connected() {
+        if let Err(e) =
+            run_invoice_subscription_recovery_sweep(app.clone(), invoice_dispatcher.clone()).await
+        {
+            warn!(error = %e, "invoice subscription recovery sweep failed");
+        }
+    } else {
+        warn!("LND boot-stub mode: skipping invoice subscription recovery sweep");
     }
 
     // LND payment-subscription task. Forwards
