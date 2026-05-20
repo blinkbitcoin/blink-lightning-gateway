@@ -1,14 +1,11 @@
 //! `add_invoice` parameter + response types, plus the per-hash
 //! `subscribe_invoice` listener.
 //!
-//! Per Story 2.3: LND's cluster-level `Lightning/SubscribeInvoices`
-//! filters out `ContractAccepted` (is_held) and `ContractCanceled`
-//! (is_canceled) events for backwards-compat (see
-//! `invoices/invoiceregistry.go:534-540`). Per-hash
-//! `SubscribeSingleInvoice` (under `invoicesrpc`) is the only path that
-//! observes the full lifecycle. The gateway spawns one listener per
-//! invoice at `App::create_invoice` time + at startup via the recovery
-//! sweep for any open invoice.
+//! Per-hash `SubscribeSingleInvoice` is the only invoice-observation
+//! path: LND's cluster-level `Lightning/SubscribeInvoices` drops
+//! `Accepted` / `Canceled` events for backwards-compat. A listener is
+//! spawned per invoice at `App::create_invoice` time + by the recovery
+//! sweep at startup.
 
 use std::time::Duration;
 
@@ -54,36 +51,26 @@ pub enum LndInvoiceState {
 pub struct InvoiceUpdate {
     pub payment_hash: PaymentHash,
     pub state: LndInvoiceState,
-    /// Sum of HTLC `amt_msat` over HTLCs in the `Accepted` state. For
-    /// the `Accepted` state this is the parked amount; for other
-    /// states it is informational.
+    /// Sum of `amt_msat` over `Accepted` HTLCs — the parked amount.
     pub htlc_amount_msat: MilliSatoshi,
-    /// Present iff `state == Settled`. LND emits `r_preimage` as 32
-    /// bytes on settle and empty otherwise.
+    /// Present iff `state == Settled`.
     pub payment_preimage: Option<Preimage>,
 }
 
-/// Outcome of a `subscribe_invoice` call. Distinguishes "expected
-/// exit" (terminal state reached, or cancellation requested) from
-/// "unexpected exit" (stream error etc.) so the spawn wrapper around
-/// `subscribe_invoice` can emit `tracing::error!` only when warranted.
+/// Expected exit reason for `subscribe_invoice`. Any `Err` return is
+/// instead the unexpected case, which the caller surfaces loudly.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SubscribeInvoiceExit {
-    /// Forwarded a terminal state (`Settled` or `Canceled`) — the
-    /// invoice's lifecycle is complete, no more updates will come.
+    /// Forwarded a terminal state (`Settled` or `Canceled`).
     Terminal,
-    /// `cancel.cancelled()` fired; shutdown in progress.
+    /// `cancel.cancelled()` fired.
     Cancelled,
 }
 
-/// Drive LND's per-hash `Invoices/SubscribeSingleInvoice` stream for a
-/// single `payment_hash` until either a terminal state is forwarded
-/// or cancellation fires. Reconnects on transient stream errors with
-/// the same 2s backoff `subscribe_payments` uses.
-///
-/// Boot-stub mode: if `lnd` was constructed via `boot_stub`, the call
-/// returns `Ok(Cancelled)` after awaiting cancellation; no stream is
-/// opened.
+/// Drive LND's per-hash `SubscribeSingleInvoice` stream until a
+/// terminal state is forwarded or cancellation fires. Reconnects on
+/// transient stream errors with a 2s backoff. In boot-stub mode,
+/// returns `Ok(Cancelled)` without opening a stream.
 pub async fn subscribe_invoice(
     lnd: LndClient,
     payment_hash: PaymentHash,
@@ -196,17 +183,9 @@ async fn drive_stream(
     }
 }
 
-/// Map an `lnrpc::Invoice` to our adapter's `InvoiceUpdate`.
-///
-/// - `r_hash` (32 bytes) → `PaymentHash`.
-/// - `state` (i32) → `LndInvoiceState`; unknown enums become
-///   `LndError::InvalidResponse`.
-/// - `htlcs` filtered to `InvoiceHtlcState::Accepted` and summed →
-///   `htlc_amount_msat`.
-/// - `r_preimage` (32 bytes on Settle, empty otherwise) → `Option<Preimage>`.
-/// - `add_index` / `settle_index` are read by the prost decoder but
-///   discarded here — no consumer needs them (the cluster
-///   `subscribe_invoices` task is intentionally absent from this story).
+/// Map an `lnrpc::Invoice` to our adapter's `InvoiceUpdate`. An
+/// unknown state enum or a malformed `r_hash` surfaces as
+/// `LndError::InvalidResponse`.
 pub(crate) fn lnd_invoice_to_update(invoice: lnrpc::Invoice) -> Result<InvoiceUpdate, LndError> {
     let r_hash_len = invoice.r_hash.len();
     let r_hash: [u8; 32] = invoice.r_hash.try_into().map_err(|_| {
@@ -251,8 +230,8 @@ fn sum_accepted_htlcs(htlcs: &[lnrpc::InvoiceHtlc]) -> Result<MilliSatoshi, LndE
     Ok(MilliSatoshi::new(total))
 }
 
-/// LND's `Invoice.r_preimage` is `Vec<u8>`: 32 bytes when settled,
-/// empty otherwise. Anything else is a wire anomaly; log + return None.
+/// `r_preimage` is 32 bytes when settled, empty otherwise. Any other
+/// length is a wire anomaly — log and return `None`.
 fn parse_preimage(bytes: &[u8], payment_hash: &PaymentHash) -> Option<Preimage> {
     if bytes.is_empty() {
         return None;

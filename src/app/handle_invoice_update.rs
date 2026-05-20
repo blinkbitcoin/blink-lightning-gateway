@@ -1,17 +1,6 @@
-//! Subscription-driven invoice-update handler — dispatches LND
-//! per-hash `SubscribeSingleInvoice` updates through
-//! `App::handle_invoice_update` and three transition helpers
-//! (`transition_to_held`, `transition_to_invoice_settled`,
-//! `transition_to_invoice_canceled`).
-//!
-//! Also home to the `InvoiceUpdateDispatcher` — owns the shared
-//! `mpsc::Sender<InvoiceUpdate>`, the `LndClient`, the
-//! `CancellationToken`, and a `HashSet<PaymentHash>` of currently-active
-//! per-hash listeners. `spawn_listener_for` is idempotent: calling it
-//! twice for the same `payment_hash` is a no-op. The spawn wrapper
-//! implements AC9: a per-hash listener that exits via any path OTHER
-//! than `cancel.cancelled()` or terminal-state forwarding logs
-//! `tracing::error!`.
+//! `App::handle_invoice_update` + `InvoiceUpdateDispatcher`. The
+//! dispatcher coordinates per-hash `subscribe_invoice` listeners;
+//! `handle_invoice_update` applies one update from a listener.
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -31,10 +20,8 @@ use crate::lnd::{
 use crate::outbox::NewOutboxEvent;
 use crate::primitives::{MilliSatoshi, PaymentHash, Preimage, Timestamp};
 
-/// Coordinates per-hash `subscribe_invoice` listeners. Constructed
-/// once in `cli::run_cmd` and shared (via `Clone`) into `App::new` so
-/// `App::create_invoice` can spawn a listener immediately after the
-/// LND `add_invoice` ack.
+/// Coordinates per-hash `subscribe_invoice` listeners. `inner` is
+/// `None` for the test-only no-op dispatcher.
 #[derive(Clone)]
 pub struct InvoiceUpdateDispatcher {
     inner: Option<Arc<InvoiceUpdateDispatcherInner>>,
@@ -48,7 +35,6 @@ struct InvoiceUpdateDispatcherInner {
 }
 
 impl InvoiceUpdateDispatcher {
-    /// Real dispatcher: spawns per-hash `subscribe_invoice` listeners.
     pub fn new(lnd: LndClient, tx: mpsc::Sender<InvoiceUpdate>, cancel: CancellationToken) -> Self {
         Self {
             inner: Some(Arc::new(InvoiceUpdateDispatcherInner {
@@ -60,17 +46,15 @@ impl InvoiceUpdateDispatcher {
         }
     }
 
-    /// Test-only constructor whose `spawn_listener_for` is a no-op. Used
-    /// by integration tests that drive `handle_invoice_update`
-    /// synthetically without real per-hash listeners.
+    /// No-op dispatcher for tests that drive `handle_invoice_update`
+    /// synthetically.
     pub fn for_test() -> Self {
         Self { inner: None }
     }
 
-    /// Spawn a per-hash listener for `payment_hash`. Idempotent: calling
-    /// twice for the same hash is a debug-log + no-op. The spawned task
-    /// implements AC9: any exit path other than terminal-state or
-    /// cancellation logs `tracing::error!`.
+    /// Idempotent — duplicate calls for the same hash are a no-op.
+    /// Unexpected listener exits surface as `tracing::error!` so
+    /// silent-death failure modes are visible.
     pub fn spawn_listener_for(&self, payment_hash: PaymentHash) {
         let Some(inner) = self.inner.as_ref() else {
             ::tracing::debug!(
@@ -81,6 +65,7 @@ impl InvoiceUpdateDispatcher {
         };
 
         {
+            // A panicking listener task must not lock the dispatcher out of subsequent spawns
             let mut guard = match inner.active.lock() {
                 Ok(g) => g,
                 Err(poisoned) => poisoned.into_inner(),
@@ -104,7 +89,7 @@ impl InvoiceUpdateDispatcher {
                 Ok(SubscribeInvoiceExit::Terminal) => {
                     ::tracing::debug!(
                         payment_hash = %payment_hash.to_hex(),
-                        "per-hash invoice listener exited cleanly at terminal state"
+                        "per-hash invoice listener exited at terminal state"
                     );
                 }
                 Ok(SubscribeInvoiceExit::Cancelled) => {
@@ -117,13 +102,11 @@ impl InvoiceUpdateDispatcher {
                     ::tracing::error!(
                         payment_hash = %payment_hash.to_hex(),
                         error = %e,
-                        "per-hash invoice listener exited unexpectedly; \
-                         this invoice will not have a live observer until next restart's recovery sweep"
+                        "per-hash invoice listener exited unexpectedly"
                     );
                 }
             }
-            // Always release the slot — listener can be respawned by the
-            // recovery sweep if it died unexpectedly.
+            // Release the slot so the recovery sweep can respawn if needed.
             let mut guard = match inner_for_cleanup.active.lock() {
                 Ok(g) => g,
                 Err(poisoned) => poisoned.into_inner(),
@@ -134,15 +117,9 @@ impl InvoiceUpdateDispatcher {
 }
 
 impl App {
-    /// Handle one `InvoiceUpdate` from a per-hash `subscribe_invoice`
-    /// listener. Dispatches on `LndInvoiceState` to the matching
-    /// transition helper. All work happens in one DB transaction so the
-    /// projection update and the outbox row land together.
-    ///
-    /// `NotFound` is quiet-ignored: per-hash listeners spawned by
-    /// `App::create_invoice` always run after the create's tx commits,
-    /// but the recovery sweep + transient races can in principle deliver
-    /// an update for an unknown payment_hash.
+    /// Apply one update from a per-hash listener. Quiet-ignores
+    /// `NotFound` to absorb the create / listener-spawn race; dispatches
+    /// each `LndInvoiceState` to its transition helper.
     pub async fn handle_invoice_update(&self, update: InvoiceUpdate) -> Result<(), AppError> {
         let invoice = match self
             .invoices
@@ -165,10 +142,10 @@ impl App {
 
         match update.state {
             LndInvoiceState::Open => {
-                ::tracing::trace!(
-                    payment_hash = %payment_hash.to_hex(),
-                    "initial Open state from per-hash listener; row already in Pending"
-                );
+                // `SubscribeSingleInvoice` always emits the current
+                // state on subscribe; for a freshly-created invoice
+                // that's Open, matching the row's existing state.
+                ::tracing::trace!(payment_hash = %payment_hash.to_hex(), "initial Open state; no-op");
                 Ok(())
             }
             LndInvoiceState::Accepted => {
@@ -185,10 +162,9 @@ impl App {
                     .await
             }
             LndInvoiceState::Canceled => {
-                // Story 2.3's subscription path only ever sees Canceled
-                // from LND's auto-cancel on timeout. Story 2.4 will
-                // wire `CancelReason::Manual` through a separate
-                // explicit-cancel App method.
+                // Subscription path only observes LND's auto-cancel on
+                // timeout; explicit-cancel commands will fire `Manual`
+                // through a separate method.
                 self.transition_to_invoice_canceled(
                     invoice,
                     payment_hash,
@@ -200,7 +176,7 @@ impl App {
         }
     }
 
-    /// `Pending → Held` on LND `Accepted`.
+    /// `Open → Held` on LND `Accepted`.
     async fn transition_to_held(
         &self,
         mut invoice: Invoice,
@@ -215,7 +191,7 @@ impl App {
                 ::tracing::info!(
                     payment_hash = %payment_hash.to_hex(),
                     current_state = %invoice.state,
-                    "mark_held ignored — duplicate Accepted replay"
+                    "mark_held ignored — duplicate replay"
                 );
                 return Ok(());
             }
@@ -246,7 +222,7 @@ impl App {
         Ok(())
     }
 
-    /// `(Pending|Held) → Settled` on LND `Settled` (`is_confirmed`).
+    /// `(Open|Held) → Settled` on LND `is_confirmed`.
     async fn transition_to_invoice_settled(
         &self,
         mut invoice: Invoice,
@@ -261,7 +237,7 @@ impl App {
                 ::tracing::info!(
                     payment_hash = %payment_hash.to_hex(),
                     current_state = %invoice.state,
-                    "settle ignored — duplicate Settled replay"
+                    "settle ignored — duplicate replay"
                 );
                 return Ok(());
             }
@@ -292,7 +268,7 @@ impl App {
         Ok(())
     }
 
-    /// `(Pending|Held) → Canceled` on LND `Canceled` (`is_canceled`).
+    /// `(Open|Held) → Canceled` on LND `is_canceled`.
     async fn transition_to_invoice_canceled(
         &self,
         mut invoice: Invoice,
@@ -301,6 +277,8 @@ impl App {
         now: Timestamp,
     ) -> Result<(), AppError> {
         let wallet_id = invoice.wallet_id;
+        // Clone so the outbox metadata can reference it after
+        // `cancel()` consumes the original.
         let reason_for_outbox = reason.clone();
         match invoice.cancel(reason, now)? {
             Idempotent::Executed(()) => {}
@@ -308,7 +286,7 @@ impl App {
                 ::tracing::info!(
                     payment_hash = %payment_hash.to_hex(),
                     current_state = %invoice.state,
-                    "cancel ignored — duplicate Canceled replay"
+                    "cancel ignored — duplicate replay"
                 );
                 return Ok(());
             }

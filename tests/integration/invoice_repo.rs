@@ -82,14 +82,14 @@ async fn create_writes_one_invoices_row_and_one_event_row() {
 }
 
 #[tokio::test]
-async fn list_open_invoices_returns_pending_and_held_only() {
+async fn list_open_invoices_returns_open_and_held_only() {
     // Seed three invoices, transition two to terminal states; assert
-    // `list_open_invoices` returns the Pending one + a Held one only.
+    // `list_open_invoices` returns the Open one + a Held one only.
     let db = TestDatabase::new().await.expect("test db");
     let pool = db.pool.clone();
     let invoices = Invoices::new(&pool);
 
-    let pending = invoices
+    let open_invoice = invoices
         .create(
             NewInvoice::try_new(
                 PaymentHash::from([0x01; 32]),
@@ -102,7 +102,7 @@ async fn list_open_invoices_returns_pending_and_held_only() {
             .unwrap(),
         )
         .await
-        .expect("create pending");
+        .expect("create open");
 
     let mut held = invoices
         .create(
@@ -148,8 +148,8 @@ async fn list_open_invoices_returns_pending_and_held_only() {
     let open = invoices.list_open_invoices().await.expect("list");
     let ids: Vec<_> = open.iter().map(|i| i.id).collect();
     assert!(
-        ids.contains(&pending.id),
-        "pending invoice expected in list"
+        ids.contains(&open_invoice.id),
+        "open invoice expected in list"
     );
     assert!(ids.contains(&held.id), "held invoice expected in list");
     assert!(

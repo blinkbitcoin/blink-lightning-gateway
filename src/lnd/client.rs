@@ -137,12 +137,10 @@ impl LndClient {
         Ok(stream)
     }
 
-    /// Open the per-hash `Invoices/SubscribeSingleInvoice` stream. Used
-    /// by `subscribe_invoice` in `invoice.rs`. Returns `LndError::Stub`
-    /// if this client was constructed via `boot_stub`. `SubscribeSingleInvoice`
-    /// always emits the current invoice state on subscribe (per
-    /// `invoices.proto:31-35`) — that's what makes the recovery sweep
-    /// work for invoices that transitioned during outage.
+    /// Open the per-hash `Invoices/SubscribeSingleInvoice` stream.
+    /// `SubscribeSingleInvoice` always emits the current invoice state
+    /// on subscribe (per `invoices.proto:31-35`) — that's what makes
+    /// the recovery sweep work for invoices that transitioned during outage.
     pub async fn subscribe_single_invoice_stream(
         &self,
         payment_hash: PaymentHash,

@@ -91,18 +91,9 @@ impl FromStr for GatewayEventType {
     }
 }
 
-/// Gateway-specific domain events.
-///
-/// `LightningInvoiceSettled` (Story 1.5 / Story 2.3 production trigger
-/// via the per-hash `subscribe_invoice` listener) names the wire event
-/// `is_confirmed`. Synonym: "Confirmed" — kept here for grep-ability.
-/// `LightningHtlcHeld` (Story 2.3) names `is_held`; maps to
-/// `IncomingPaymentPending`. `LightningInvoiceCanceled` (Story 2.3)
-/// names `is_canceled`; maps to `IncomingPaymentCanceled` and runs
-/// without a Cala template until Story 2.4 authors
-/// `LIGHTNING_INVOICE_CANCELED`.
-/// `LightningPaymentInitiated`/`Completed`/`Failed` (Story 2.2) handle
-/// the symmetric outbound flow; `LightningPaymentReversed` is reserved.
+/// Gateway-specific domain events. See `to_standardized` for the
+/// mapping onto the 8-event vocabulary. `LightningPaymentReversed`
+/// is reserved — no current producer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GatewayDomainEvent {
@@ -251,10 +242,8 @@ impl NewOutboxEvent {
         }
     }
 
-    /// Construct a `LightningInvoiceSettled` outbox row. Production
-    /// trigger (LND `subscribe_invoices` `is_confirmed` callback) lands
-    /// in Story 2.3; until then this constructor is exercised only by
-    /// integration tests that demonstrate the outbox → gRPC pipeline.
+    /// Construct a `LightningInvoiceSettled` outbox row. Fires on
+    /// LND `is_confirmed`. Maps to `IncomingPaymentConfirmed`.
     pub fn for_lightning_invoice_settled(
         correlation_id: impl Into<String>,
         payment_hash_hex: impl Into<String>,
@@ -341,11 +330,9 @@ impl NewOutboxEvent {
         )
     }
 
-    /// Construct a `LightningHtlcHeld` outbox row. Fires when LND's
-    /// per-hash `SubscribeSingleInvoice` reports `Accepted` (an HTLC
-    /// parked on a HOLD invoice). Maps to `IncomingPaymentPending`; the
-    /// Symphony `LIGHTNING_INVOICE_PENDING` template posts the
-    /// PENDING-layer hold for the held amount.
+    /// Construct a `LightningHtlcHeld` outbox row. Fires when LND
+    /// reports `Accepted` (HTLC parked on a HOLD invoice). Maps to
+    /// `IncomingPaymentPending`.
     pub fn for_lightning_htlc_held(
         correlation_id: impl Into<String>,
         payment_hash_hex: impl Into<String>,
@@ -363,11 +350,8 @@ impl NewOutboxEvent {
         )
     }
 
-    /// Construct a `LightningInvoiceCanceled` outbox row. Fires when
-    /// LND emits `is_canceled`. Maps to `IncomingPaymentCanceled`. The
-    /// `LIGHTNING_INVOICE_CANCELED` Cala template is deferred to
-    /// Story 2.4; the outbox row still emits so a future Symphony-side
-    /// handler-routing arm can consume it.
+    /// Construct a `LightningInvoiceCanceled` outbox row. Fires on
+    /// LND `is_canceled`. Maps to `IncomingPaymentCanceled`.
     pub fn for_lightning_invoice_canceled(
         correlation_id: impl Into<String>,
         payment_hash_hex: impl Into<String>,

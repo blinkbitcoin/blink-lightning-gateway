@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id FROM invoices WHERE state IN ('pending', 'held')",
+  "query": "SELECT id FROM invoices WHERE state IN ('open', 'held')",
   "describe": {
     "columns": [
       {
@@ -16,5 +16,5 @@
       false
     ]
   },
-  "hash": "cd414878bba9f1475c2465d18ce6e6271adced23ff0eb4557d06ecad056deefc"
+  "hash": "08f137104d5834de3d82c021123778e19bb2e9e06694ee22d7a4cefbfdc972a4"
 }

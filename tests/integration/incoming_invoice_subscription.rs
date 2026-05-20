@@ -1,11 +1,7 @@
-//! Story 2.3 E2E: drives `App::handle_invoice_update` against
-//! testcontainers Postgres with synthetic `InvoiceUpdate` values and
-//! asserts the entity transitions + outbox-row emissions + the
-//! gRPC + Symphony-stub consumer pipeline.
-//!
-//! Adapter-layer wire-format coverage (the `lnrpc::Invoice → InvoiceUpdate`
-//! mapper) lives in `src/lnd/invoice.rs`'s inline unit tests; manual
-//! `tilt up` smoke against `lnd1` exercises the live-streaming glue.
+//! Integration coverage for `App::handle_invoice_update`: drives synthetic
+//! `InvoiceUpdate` values, asserts entity transitions + outbox rows +
+//! the gRPC subscriber pipeline. Wire-format mapping coverage lives
+//! in `src/lnd/invoice.rs` unit tests.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -43,8 +39,8 @@ const PH_B: [u8; 32] = [0x0b; 32];
 const PH_C: [u8; 32] = [0x0c; 32];
 const PH_D: [u8; 32] = [0x0d; 32];
 
-/// Hand-written LND stub. `add_invoice` returns the next entry from
-/// `canned_hashes` so each `create_invoice` call gets a distinct hash.
+/// LND stub. `add_invoice` pops the next canned hash so each
+/// `create_invoice` call gets a distinct one.
 struct CannedLnd {
     canned_hashes: AsyncMutex<Vec<[u8; 32]>>,
 }
@@ -106,7 +102,7 @@ fn template_name_for(event_type: i32) -> &'static str {
         Ok(GatewayEventType::IncomingPaymentConfirmed) => "LIGHTNING_INVOICE_SETTLED",
         Ok(GatewayEventType::IncomingPaymentPending) => "LIGHTNING_INVOICE_PENDING",
         Ok(GatewayEventType::IncomingPaymentCanceled) => "LIGHTNING_INVOICE_CANCELED",
-        other => panic!("unsupported event_type for Story 2.3: {other:?}"),
+        other => panic!("unsupported event_type: {other:?}"),
     }
 }
 
@@ -140,7 +136,7 @@ async fn run_symphony_stub(
     }
 }
 
-fn nir(wallet: WalletId) -> NewInvoiceRequest {
+fn invoice_request(wallet: WalletId) -> NewInvoiceRequest {
     NewInvoiceRequest {
         wallet_id: wallet,
         amount_msat: MilliSatoshi::new(1_000_000),
@@ -149,14 +145,15 @@ fn nir(wallet: WalletId) -> NewInvoiceRequest {
     }
 }
 
+/// Walks all four `LndInvoiceState` arms plus the idempotent-replay
+/// and contradictory-transition cases, then asserts the produced
+/// outbox rows stream through gRPC into the Symphony stub.
 #[tokio::test]
 async fn incoming_invoice_subscription_drives_full_lifecycle() {
     let db = TestDatabase::new().await.expect("test db");
     let pool = db.pool.clone();
 
-    // Three canned payment_hashes for invoices A/B/C, plus D for the
-    // Pending → Held → Settled lifecycle. Pop order is LIFO, so list
-    // them in reverse.
+    // Canned hashes pop LIFO — listed reverse of consumption order.
     let canned = CannedLnd::new(vec![PH_D, PH_C, PH_B, PH_A]);
     let outbox = EventPublisher::new(&pool);
     let symphony: Arc<dyn SymphonyClient> = Arc::new(LightningSymphonyClient::new(""));
@@ -168,24 +165,34 @@ async fn incoming_invoice_subscription_drives_full_lifecycle() {
         InvoiceUpdateDispatcher::for_test(),
     );
 
-    // Step 1 — create invoices A/B/C
+    // Step 1 — create invoices.
     let wallet = WalletId::from(Uuid::now_v7());
-    let inv_a = app.create_invoice(nir(wallet)).await.expect("create A");
+    let inv_a = app
+        .create_invoice(invoice_request(wallet))
+        .await
+        .expect("create A");
     assert_eq!(inv_a.payment_hash, PaymentHash::from(PH_A));
-    assert_eq!(inv_a.state, InvoiceState::Pending);
+    assert_eq!(inv_a.state, InvoiceState::Open);
 
-    let inv_b = app.create_invoice(nir(wallet)).await.expect("create B");
+    let inv_b = app
+        .create_invoice(invoice_request(wallet))
+        .await
+        .expect("create B");
     assert_eq!(inv_b.payment_hash, PaymentHash::from(PH_B));
 
-    let inv_c = app.create_invoice(nir(wallet)).await.expect("create C");
+    let inv_c = app
+        .create_invoice(invoice_request(wallet))
+        .await
+        .expect("create C");
     assert_eq!(inv_c.payment_hash, PaymentHash::from(PH_C));
 
-    let inv_d = app.create_invoice(nir(wallet)).await.expect("create D");
+    let inv_d = app
+        .create_invoice(invoice_request(wallet))
+        .await
+        .expect("create D");
     assert_eq!(inv_d.payment_hash, PaymentHash::from(PH_D));
 
-    // Bring up the gRPC server + subscription so we can assert the
-    // pipeline rolls all outbox rows through. Subscribe before any
-    // outbox row fires.
+    // Subscribe before any outbox row fires.
     let cancel_token = CancellationToken::new();
     let svc =
         LightningPaymentGatewayService::new(pool.clone(), db.url.clone(), cancel_token.clone())
@@ -237,7 +244,7 @@ async fn incoming_invoice_subscription_drives_full_lifecycle() {
     )
     .await;
 
-    // Step 3 — Accepted (HOLD-HTLC arrival) for B.
+    // Step 3 — Accepted for B (HTLC arrived).
     app.handle_invoice_update(InvoiceUpdate {
         payment_hash: PaymentHash::from(PH_B),
         state: LndInvoiceState::Accepted,
@@ -267,8 +274,7 @@ async fn incoming_invoice_subscription_drives_full_lifecycle() {
     )
     .await;
 
-    // Step 5 — Duplicate Settled for A → idempotent no-op, no new
-    // outbox row.
+    // Step 5 — Duplicate Settled → idempotent; no new outbox row.
     app.handle_invoice_update(InvoiceUpdate {
         payment_hash: PaymentHash::from(PH_A),
         state: LndInvoiceState::Settled,
@@ -279,7 +285,7 @@ async fn incoming_invoice_subscription_drives_full_lifecycle() {
     .expect("duplicate settle is Ok(())");
     assert_outbox_total(&pool, 3).await;
 
-    // Step 6 — Contradictory Canceled after Settled for A → error.
+    // Step 6 — Canceled after Settled → InvalidStateTransition.
     let err = app
         .handle_invoice_update(InvoiceUpdate {
             payment_hash: PaymentHash::from(PH_A),
@@ -298,8 +304,7 @@ async fn incoming_invoice_subscription_drives_full_lifecycle() {
     }
     assert_outbox_total(&pool, 3).await;
 
-    // Step 7 — D: Pending → Held → Settled (covers the HOLD lifecycle
-    // Story 2.4 depends on).
+    // Step 7 — Open → Held → Settled (HOLD lifecycle).
     let preimage_d = Preimage::from([0xfa; 32]);
     app.handle_invoice_update(InvoiceUpdate {
         payment_hash: PaymentHash::from(PH_D),
@@ -328,8 +333,7 @@ async fn incoming_invoice_subscription_drives_full_lifecycle() {
     )
     .await;
 
-    // Step 8 — gRPC consumer pipeline: 5 outbox rows produced → 5
-    // CalaMock entries via the Symphony-stub consumer.
+    // Step 8 — consumer pipeline: 5 outbox rows → 5 CalaMock entries.
     let cala = CalaMock::default();
     let stub_handle = tokio::spawn(run_symphony_stub(stream, cala.clone(), 5));
     tokio::time::timeout(Duration::from_secs(15), stub_handle)
@@ -340,7 +344,6 @@ async fn incoming_invoice_subscription_drives_full_lifecycle() {
     let entries = cala.snapshot().await;
     assert_eq!(entries.len(), 5, "expected 5 Cala mock entries");
 
-    // Template-count tally.
     let count =
         |name: &str| -> usize { entries.iter().filter(|e| e.template_name == name).count() };
     assert_eq!(count("LIGHTNING_INVOICE_SETTLED"), 2);
@@ -351,34 +354,28 @@ async fn incoming_invoice_subscription_drives_full_lifecycle() {
     let _ = tokio::time::timeout(Duration::from_secs(2), server_handle).await;
 }
 
+/// After a restart, `list_open_invoices` finds the open/held set
+/// and updates delivered on re-subscribe drive each invoice to its
+/// terminal state — the crash-recovery path.
 #[tokio::test]
 async fn recovery_sweep_respawns_listeners_for_open_invoices() {
-    // Seeds Pending + Held invoices, calls the recovery sweep with a
-    // stubbed CannedLnd whose subscribe_invoice records the payment_hash
-    // it was called for and emits a canned terminal-state update.
-    // Asserts:
-    //   - Both seeded payment_hashes recorded by the stub.
-    //   - The seeded Pending invoice transitions to Settled in the DB.
-    //   - The seeded Held invoice transitions to Canceled in the DB.
-
     let db = TestDatabase::new().await.expect("test db");
     let pool = db.pool.clone();
 
-    // Seed two invoices via the repo directly.
     let invoices_repo = Invoices::new(&pool);
-    let pending_hash = PaymentHash::from([0x11; 32]);
+    let open_hash = PaymentHash::from([0x11; 32]);
     let held_hash = PaymentHash::from([0x22; 32]);
 
-    let pending_new = NewInvoice::try_new(
-        pending_hash,
+    let open_new = NewInvoice::try_new(
+        open_hash,
         WalletId::from(Uuid::now_v7()),
         MilliSatoshi::new(1_000_000),
         3600,
-        BoltInvoice::new("lnbc-pending"),
+        BoltInvoice::new("lnbc-open"),
         Timestamp::now(),
     )
     .unwrap();
-    invoices_repo.create(pending_new).await.unwrap();
+    invoices_repo.create(open_new).await.unwrap();
 
     let held_new = NewInvoice::try_new(
         held_hash,
@@ -395,17 +392,10 @@ async fn recovery_sweep_respawns_listeners_for_open_invoices() {
         .unwrap();
     invoices_repo.update(&mut held_inv).await.unwrap();
 
-    // App with a for_test dispatcher — we'll drive recovery via a
-    // custom dispatcher-like channel below since `for_test()`'s
-    // `spawn_listener_for` is a no-op.
-    //
-    // The integration suite can't see the lib's mockall mocks, and
-    // our real `InvoiceUpdateDispatcher` requires a `LndClient`.
-    // Rather than instantiating one, we exercise the recovery-sweep
-    // shape directly: enumerate open invoices and call
-    // `handle_invoice_update` with synthetic updates — same path the
-    // production sweep takes through the consumer task.
-
+    // The real InvoiceUpdateDispatcher needs an LndClient; here we
+    // exercise the sweep shape directly — enumerate open invoices and
+    // feed synthetic updates through `handle_invoice_update`, the same
+    // path the production consumer task takes.
     let canned = CannedLnd::new(Vec::new());
     let outbox = EventPublisher::new(&pool);
     let symphony: Arc<dyn SymphonyClient> = Arc::new(LightningSymphonyClient::new(""));
@@ -423,19 +413,18 @@ async fn recovery_sweep_respawns_listeners_for_open_invoices() {
         seen_hashes.insert(invoice.payment_hash);
     }
     assert!(
-        seen_hashes.contains(&pending_hash),
-        "pending invoice expected in sweep"
+        seen_hashes.contains(&open_hash),
+        "open invoice expected in sweep"
     );
     assert!(
         seen_hashes.contains(&held_hash),
         "held invoice expected in sweep"
     );
 
-    // Simulate the per-hash listener emitting the current state on
-    // subscribe (LND's `SubscribeSingleInvoice` initial-state emission).
+    // Simulate `SubscribeSingleInvoice`'s initial-state-on-subscribe.
     let (tx, mut rx) = mpsc::channel::<InvoiceUpdate>(8);
     tx.send(InvoiceUpdate {
-        payment_hash: pending_hash,
+        payment_hash: open_hash,
         state: LndInvoiceState::Settled,
         htlc_amount_msat: MilliSatoshi::new(1_000_000),
         payment_preimage: Some(Preimage::from([0xee; 32])),
@@ -456,7 +445,7 @@ async fn recovery_sweep_respawns_listeners_for_open_invoices() {
         app.handle_invoice_update(update).await.unwrap();
     }
 
-    assert_state(&pool, &pending_hash, "settled").await;
+    assert_state(&pool, &open_hash, "settled").await;
     assert_state(&pool, &held_hash, "canceled").await;
 }
 

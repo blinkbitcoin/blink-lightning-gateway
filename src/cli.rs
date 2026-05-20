@@ -222,9 +222,9 @@ async fn run_cmd(config: Config) -> anyhow::Result<()> {
         }));
     }
 
-    // Story 2.3: spawn the invoice-update consumer task. Fire-and-forget
-    // — not supervisor-tracked. It exits when `cancel.cancelled()` fires
-    // or when every sender on the mpsc has been dropped.
+    // Drains InvoiceUpdates from the per-hash listeners into
+    // `handle_invoice_update`. Not supervisor-tracked; exits on cancel
+    // or once every mpsc Sender is dropped.
     {
         let consumer_cancel = cancel.clone();
         let app_for_consumer = app.clone();
@@ -243,11 +243,10 @@ async fn run_cmd(config: Config) -> anyhow::Result<()> {
         });
     }
 
-    // Story 2.3: run the boot-time recovery sweep. Re-spawns per-hash
-    // `subscribe_invoice` listeners for every open invoice. In boot-stub
-    // mode the listeners themselves are no-ops (`subscribe_invoice`
-    // awaits cancellation without opening a stream), but we still run
-    // the sweep so the dispatcher's bookkeeping reflects reality.
+    // Re-spawn per-hash listeners for every open invoice. LND's
+    // SubscribeSingleInvoice emits the current state on subscribe, so
+    // transitions that fired during outage are picked up on the first
+    // message. Skipped in boot-stub mode — no LND to subscribe to.
     if lnd_client.is_connected() {
         if let Err(e) =
             run_invoice_subscription_recovery_sweep(app.clone(), invoice_dispatcher.clone()).await

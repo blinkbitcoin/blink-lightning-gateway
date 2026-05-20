@@ -1,29 +1,17 @@
-//! Boot-time sweep: spawn per-hash `subscribe_invoice` listeners for
-//! every invoice in a non-terminal state.
+//! Boot-time sweep: spawn a per-hash `subscribe_invoice` listener for
+//! every open invoice.
 //!
-//! Why this catches up missed transitions during outage:
-//! `SubscribeSingleInvoice` always emits the current invoice state
-//! immediately on subscribe (proto doc `invoices.proto:31-35`,
-//! verified at `invoices/invoiceregistry.go::deliverSingleBacklogEvents`).
-//! If an invoice transitioned `Pending → Held` (or any other
-//! transition) while the gateway was down, the per-hash listener
-//! spawned at recovery sees the current state on its first emission,
-//! forwards it through the mpsc, and `App::handle_invoice_update`
-//! performs the right transition.
-//!
-//! Mirrors `setupListenersForExistingHodlInvoices` at
-//! `blink/core/api/src/servers/trigger.ts:277-308`, with one key
-//! difference: this gateway enumerates via `Invoices::list_open_invoices`
-//! (DB-side) since the DB has the canonical open-invoice set for this
-//! gateway's creations. galoy's reference enumerates via LND.
+//! This catches up transitions missed during an outage:
+//! `SubscribeSingleInvoice` emits the current invoice state on
+//! subscribe, so a listener spawned at recovery sees (and applies) any
+//! transition that happened while the gateway was down.
 
 use ::tracing::info;
 
 use crate::app::{App, InvoiceUpdateDispatcher};
 
-/// Spawn a per-hash listener for every invoice currently in `Pending`
-/// or `Held`. Fire-and-forget — returns `Ok(())` after every spawn has
-/// been issued.
+/// Spawn a per-hash listener for every `Open` / `Held` invoice.
+/// Fire-and-forget — returns once every spawn has been issued.
 pub async fn run_invoice_subscription_recovery_sweep(
     app: App,
     dispatcher: InvoiceUpdateDispatcher,
