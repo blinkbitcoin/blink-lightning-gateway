@@ -376,4 +376,31 @@ mod tests {
         let update = lnd_invoice_to_update(inv).unwrap();
         assert_eq!(update.htlc_amount_msat, MilliSatoshi::new(500_000));
     }
+
+    #[test]
+    fn lnd_invoice_to_update_htlc_sum_overflow_errs() {
+        // Two ACCEPTED HTLCs whose amt_msat sum exceeds u64::MAX must
+        // surface as InvalidResponse — not wrap or panic.
+        let inv = lnrpc::Invoice {
+            r_hash: vec![0xab; 32],
+            state: lnrpc::invoice::InvoiceState::Accepted as i32,
+            htlcs: vec![
+                lnrpc::InvoiceHtlc {
+                    amt_msat: u64::MAX,
+                    state: lnrpc::InvoiceHtlcState::Accepted as i32,
+                    ..Default::default()
+                },
+                lnrpc::InvoiceHtlc {
+                    amt_msat: 1,
+                    state: lnrpc::InvoiceHtlcState::Accepted as i32,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        match lnd_invoice_to_update(inv) {
+            Err(LndError::InvalidResponse(msg)) => assert!(msg.contains("overflow")),
+            other => panic!("expected InvalidResponse, got {other:?}"),
+        }
+    }
 }
