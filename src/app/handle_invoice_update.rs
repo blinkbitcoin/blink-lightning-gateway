@@ -20,11 +20,21 @@ use crate::lnd::{
 use crate::outbox::NewOutboxEvent;
 use crate::primitives::{MilliSatoshi, PaymentHash, Preimage, Timestamp};
 
-/// Coordinates per-hash `subscribe_invoice` listeners. `inner` is
-/// `None` for the test-only no-op dispatcher.
+/// Coordinates per-hash `subscribe_invoice` listeners.
 #[derive(Clone)]
 pub struct InvoiceUpdateDispatcher {
-    inner: Option<Arc<InvoiceUpdateDispatcherInner>>,
+    mode: Mode,
+}
+
+/// `Live` in production; the test variants stand in without an LND
+/// connection — `NoOp` for tests that drive `handle_invoice_update`
+/// synthetically, `Recording` for tests that need to observe which
+/// hashes a caller asked to subscribe.
+#[derive(Clone)]
+enum Mode {
+    Live(Arc<InvoiceUpdateDispatcherInner>),
+    NoOp,
+    Recording(Arc<Mutex<Vec<PaymentHash>>>),
 }
 
 struct InvoiceUpdateDispatcherInner {
@@ -37,7 +47,7 @@ struct InvoiceUpdateDispatcherInner {
 impl InvoiceUpdateDispatcher {
     pub fn new(lnd: LndClient, tx: mpsc::Sender<InvoiceUpdate>, cancel: CancellationToken) -> Self {
         Self {
-            inner: Some(Arc::new(InvoiceUpdateDispatcherInner {
+            mode: Mode::Live(Arc::new(InvoiceUpdateDispatcherInner {
                 lnd,
                 tx,
                 cancel,
@@ -49,25 +59,58 @@ impl InvoiceUpdateDispatcher {
     /// No-op dispatcher for tests that drive `handle_invoice_update`
     /// synthetically.
     pub fn for_test() -> Self {
-        Self { inner: None }
+        Self { mode: Mode::NoOp }
+    }
+
+    /// Recording dispatcher for tests: `spawn_listener_for` records the
+    /// hash instead of spawning a listener, so a test can drive the real
+    /// `run_invoice_subscription_recovery_sweep` and assert which
+    /// invoices it asked to subscribe (read back via `recorded`).
+    pub fn recording_for_test() -> Self {
+        Self {
+            mode: Mode::Recording(Arc::new(Mutex::new(Vec::new()))),
+        }
+    }
+
+    /// Hashes passed to `spawn_listener_for`, in call order. Always empty
+    /// unless this dispatcher was built via `recording_for_test`.
+    pub fn recorded(&self) -> Vec<PaymentHash> {
+        match &self.mode {
+            Mode::Recording(recorded_hashes) => match recorded_hashes.lock() {
+                Ok(guard) => guard.clone(),
+                Err(poisoned) => poisoned.into_inner().clone(),
+            },
+            _ => Vec::new(),
+        }
     }
 
     /// Idempotent — duplicate calls for the same hash are a no-op.
     /// Unexpected listener exits surface as `tracing::error!` so
     /// silent-death failure modes are visible.
     pub fn spawn_listener_for(&self, payment_hash: PaymentHash) {
-        let Some(inner) = self.inner.as_ref() else {
-            ::tracing::debug!(
-                payment_hash = %payment_hash.to_hex(),
-                "spawn_listener_for skipped — for_test dispatcher"
-            );
-            return;
+        let inner = match &self.mode {
+            Mode::Live(inner) => inner,
+            Mode::NoOp => {
+                ::tracing::debug!(
+                    payment_hash = %payment_hash.to_hex(),
+                    "spawn_listener_for skipped — for_test dispatcher"
+                );
+                return;
+            }
+            Mode::Recording(recorded_hashes) => {
+                let mut guard = match recorded_hashes.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                guard.push(payment_hash);
+                return;
+            }
         };
 
         {
             // A panicking listener task must not lock the dispatcher out of subsequent spawns
             let mut guard = match inner.active.lock() {
-                Ok(g) => g,
+                Ok(guard) => guard,
                 Err(poisoned) => poisoned.into_inner(),
             };
             if !guard.insert(payment_hash) {
@@ -108,7 +151,7 @@ impl InvoiceUpdateDispatcher {
             }
             // Release the slot so the recovery sweep can respawn if needed.
             let mut guard = match inner_for_cleanup.active.lock() {
-                Ok(g) => g,
+                Ok(guard) => guard,
                 Err(poisoned) => poisoned.into_inner(),
             };
             guard.remove(&payment_hash);

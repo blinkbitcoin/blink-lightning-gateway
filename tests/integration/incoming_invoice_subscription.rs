@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use tokio::sync::{mpsc, Mutex as AsyncMutex};
+use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::{Channel, Server};
 
@@ -16,6 +16,7 @@ use blink_lightning_gateway::api::grpc::LightningPaymentGatewayService;
 use blink_lightning_gateway::app::{App, InvoiceUpdateDispatcher, NewInvoiceRequest};
 use blink_lightning_gateway::invoice::entity::{InvoiceState, NewInvoice};
 use blink_lightning_gateway::invoice::{InvoiceError, Invoices};
+use blink_lightning_gateway::job::invoice_subscription_recovery_sweep::run_invoice_subscription_recovery_sweep;
 use blink_lightning_gateway::lightning_payment_gateway::{
     amount as proto_amount, lightning_payment_gateway_client::LightningPaymentGatewayClient,
     lightning_payment_gateway_server::LightningPaymentGatewayServer, GatewayEventType,
@@ -354,99 +355,87 @@ async fn incoming_invoice_subscription_drives_full_lifecycle() {
     let _ = tokio::time::timeout(Duration::from_secs(2), server_handle).await;
 }
 
-/// After a restart, `list_open_invoices` finds the open/held set
-/// and updates delivered on re-subscribe drive each invoice to its
-/// terminal state — the crash-recovery path.
+/// `run_invoice_subscription_recovery_sweep` must ask for a listener on
+/// every `Open` / `Held` invoice and skip terminal ones. Driven against
+/// a recording dispatcher so the assertion observes the real sweep, not
+/// a re-implementation of it.
 #[tokio::test]
-async fn recovery_sweep_respawns_listeners_for_open_invoices() {
+async fn recovery_sweep_spawns_listener_for_open_and_held_only() {
     let db = TestDatabase::new().await.expect("test db");
     let pool = db.pool.clone();
 
     let invoices_repo = Invoices::new(&pool);
     let open_hash = PaymentHash::from([0x11; 32]);
     let held_hash = PaymentHash::from([0x22; 32]);
+    let settled_hash = PaymentHash::from([0x33; 32]);
 
-    let open_new = NewInvoice::try_new(
-        open_hash,
-        WalletId::from(Uuid::now_v7()),
-        MilliSatoshi::new(1_000_000),
-        3600,
-        BoltInvoice::new("lnbc-open"),
-        Timestamp::now(),
-    )
-    .unwrap();
-    invoices_repo.create(open_new).await.unwrap();
+    // Open — never paid.
+    invoices_repo
+        .create(seed_invoice(open_hash, "lnbc-open"))
+        .await
+        .unwrap();
 
-    let held_new = NewInvoice::try_new(
-        held_hash,
-        WalletId::from(Uuid::now_v7()),
-        MilliSatoshi::new(1_000_000),
-        3600,
-        BoltInvoice::new("lnbc-held"),
-        Timestamp::now(),
-    )
-    .unwrap();
-    let mut held_inv = invoices_repo.create(held_new).await.unwrap();
-    let _ = held_inv
+    // Held — an HTLC is parked.
+    let mut held = invoices_repo
+        .create(seed_invoice(held_hash, "lnbc-held"))
+        .await
+        .unwrap();
+    let _ = held
         .mark_held(MilliSatoshi::new(1_000_000), Timestamp::now())
         .unwrap();
-    invoices_repo.update(&mut held_inv).await.unwrap();
+    invoices_repo.update(&mut held).await.unwrap();
 
-    // The real InvoiceUpdateDispatcher needs an LndClient; here we
-    // exercise the sweep shape directly — enumerate open invoices and
-    // feed synthetic updates through `handle_invoice_update`, the same
-    // path the production consumer task takes.
-    let canned = CannedLnd::new(Vec::new());
-    let outbox = EventPublisher::new(&pool);
+    // Settled — terminal; the sweep must skip it.
+    let mut settled = invoices_repo
+        .create(seed_invoice(settled_hash, "lnbc-settled"))
+        .await
+        .unwrap();
+    let _ = settled
+        .settle(Preimage::from([0xee; 32]), Timestamp::now())
+        .unwrap();
+    invoices_repo.update(&mut settled).await.unwrap();
+
     let symphony: Arc<dyn SymphonyClient> = Arc::new(LightningSymphonyClient::new(""));
     let app = App::new(
         pool.clone(),
-        Arc::new(canned),
-        outbox,
+        Arc::new(CannedLnd::new(Vec::new())),
+        EventPublisher::new(&pool),
         symphony,
         InvoiceUpdateDispatcher::for_test(),
     );
 
-    let open = app.invoices().list_open_invoices().await.unwrap();
-    let mut seen_hashes = std::collections::HashSet::new();
-    for invoice in open {
-        seen_hashes.insert(invoice.payment_hash);
-    }
-    assert!(
-        seen_hashes.contains(&open_hash),
-        "open invoice expected in sweep"
+    // Drive the real sweep; the recording dispatcher captures every
+    // hash it asked to subscribe.
+    let dispatcher = InvoiceUpdateDispatcher::recording_for_test();
+    run_invoice_subscription_recovery_sweep(app, dispatcher.clone())
+        .await
+        .unwrap();
+
+    let recorded = dispatcher.recorded();
+    assert_eq!(
+        recorded.len(),
+        2,
+        "one spawn per open/held invoice, no duplicates"
     );
-    assert!(
-        seen_hashes.contains(&held_hash),
-        "held invoice expected in sweep"
+    let recorded: std::collections::HashSet<_> = recorded.into_iter().collect();
+    assert_eq!(
+        recorded,
+        std::collections::HashSet::from([open_hash, held_hash]),
+        "recovery sweep must subscribe every open/held invoice and skip terminal ones"
     );
+}
 
-    // Simulate `SubscribeSingleInvoice`'s initial-state-on-subscribe.
-    let (tx, mut rx) = mpsc::channel::<InvoiceUpdate>(8);
-    tx.send(InvoiceUpdate {
-        payment_hash: open_hash,
-        state: LndInvoiceState::Settled,
-        htlc_amount_msat: MilliSatoshi::new(1_000_000),
-        payment_preimage: Some(Preimage::from([0xee; 32])),
-    })
-    .await
-    .unwrap();
-    tx.send(InvoiceUpdate {
-        payment_hash: held_hash,
-        state: LndInvoiceState::Canceled,
-        htlc_amount_msat: MilliSatoshi::ZERO,
-        payment_preimage: None,
-    })
-    .await
-    .unwrap();
-    drop(tx);
-
-    while let Some(update) = rx.recv().await {
-        app.handle_invoice_update(update).await.unwrap();
-    }
-
-    assert_state(&pool, &open_hash, "settled").await;
-    assert_state(&pool, &held_hash, "canceled").await;
+/// `NewInvoice` with a throwaway wallet/amount for seeding sweep rows.
+fn seed_invoice(payment_hash: PaymentHash, bolt: &str) -> NewInvoice {
+    NewInvoice::try_new(
+        payment_hash,
+        WalletId::from(Uuid::now_v7()),
+        MilliSatoshi::new(1_000_000),
+        3600,
+        BoltInvoice::new(bolt),
+        Timestamp::now(),
+    )
+    .expect("valid NewInvoice")
 }
 
 async fn assert_state(pool: &sqlx::PgPool, payment_hash: &PaymentHash, expected: &str) {
