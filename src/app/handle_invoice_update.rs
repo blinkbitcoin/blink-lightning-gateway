@@ -120,6 +120,16 @@ impl App {
     /// Apply one update from a per-hash listener. Quiet-ignores
     /// `NotFound` to absorb the create / listener-spawn race; dispatches
     /// each `LndInvoiceState` to its transition helper.
+    ///
+    /// Concurrency: the invoice is read here, before the transition
+    /// helper opens its transaction. That read-modify-write is safe only
+    /// because the single invoice-update consumer task (`src/cli.rs`)
+    /// processes updates one at a time — two concurrent
+    /// `handle_invoice_update` calls for one `payment_hash` would compute
+    /// the same next event-log `sequence` and the second commit would
+    /// violate the `invoice_events` primary key. If that consumer is ever
+    /// sharded, the transition path needs row-level locking
+    /// (`SELECT ... FOR UPDATE`).
     pub async fn handle_invoice_update(&self, update: InvoiceUpdate) -> Result<(), AppError> {
         let invoice = match self
             .invoices
@@ -142,10 +152,13 @@ impl App {
 
         match update.state {
             LndInvoiceState::Open => {
-                // `SubscribeSingleInvoice` always emits the current
-                // state on subscribe; for a freshly-created invoice
-                // that's Open, matching the row's existing state.
-                ::tracing::trace!(payment_hash = %payment_hash.to_hex(), "initial Open state; no-op");
+                // No-op by design. `SubscribeSingleInvoice` emits the
+                // current state once on subscribe, then forward
+                // transitions only — and LND's invoice state machine has
+                // no `Accepted -> Open` (nor `Settled -> Open`) edge, so
+                // `Open` can only ever arrive while the row is still
+                // `Open`. There is no `Held -> Open` regression to catch.
+                ::tracing::trace!(payment_hash = %payment_hash.to_hex(), "Open state; no-op");
                 Ok(())
             }
             LndInvoiceState::Accepted => {
@@ -292,7 +305,10 @@ impl App {
             }
         }
 
-        let amount_sat = invoice.amount_msat.whole_sat() as i64;
+        // A canceled / expired invoice moved no money — the standardized
+        // amount is 0. The original invoice amount stays on the invoice
+        // projection for anyone who needs it.
+        let amount_sat: i64 = 0;
         let mut tx = self.pool.begin().await?;
         self.invoices
             .update_in_op(&mut tx, &mut invoice)

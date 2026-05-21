@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 use tonic_health::pb::health_server::HealthServer;
 use tonic_health::server::{HealthReporter, HealthService};
 
-use ::tracing::{info, warn};
+use ::tracing::{error, info, warn};
 
 use crate::api::grpc::LightningPaymentGatewayService;
 use crate::app::{App, InvoiceUpdateDispatcher};
@@ -223,36 +223,66 @@ async fn run_cmd(config: Config) -> anyhow::Result<()> {
     }
 
     // Drains InvoiceUpdates from the per-hash listeners into
-    // `handle_invoice_update`. Not supervisor-tracked; exits on cancel
-    // or once every mpsc Sender is dropped.
+    // `handle_invoice_update`. Supervisor-tracked: a panic, or every
+    // listener Sender dropping, surfaces as a supervised exit so the
+    // binary restarts rather than going silently dark.
     {
         let consumer_cancel = cancel.clone();
         let app_for_consumer = app.clone();
-        tokio::spawn(async move {
-            loop {
+        let send = send.clone();
+        info!("Starting invoice-update consumer task");
+        handles.push(tokio::spawn(async move {
+            let outcome: anyhow::Result<()> = loop {
                 tokio::select! {
-                    _ = consumer_cancel.cancelled() => return,
+                    _ = consumer_cancel.cancelled() => break Ok(()),
                     update = invoice_update_rx.recv() => {
-                        let Some(update) = update else { return; };
-                        if let Err(e) = app_for_consumer.handle_invoice_update(update).await {
-                            warn!(error = %e, "handle_invoice_update returned error");
+                        match update {
+                            Some(update) => {
+                                if let Err(e) =
+                                    app_for_consumer.handle_invoice_update(update).await
+                                {
+                                    error!(error = %e, "handle_invoice_update returned error");
+                                }
+                            }
+                            None => break Err(anyhow::anyhow!(
+                                "invoice-update consumer exited: every listener Sender dropped"
+                            )),
                         }
+                    }
+                }
+            };
+            // Cancellation is the expected exit; anything else means the
+            // subsystem went dark.
+            let result = if consumer_cancel.is_cancelled() {
+                Ok(())
+            } else {
+                outcome
+            };
+            report_exit(&send, result);
+        }));
+    }
+
+    // Recovery sweep: re-spawn a per-hash listener for every open invoice
+    // (SubscribeSingleInvoice replays current state on subscribe, catching
+    // up transitions missed during an outage). Spawned, not awaited, so a
+    // large backlog can't delay startup; `select!` cancels a mid-sweep
+    // query on shutdown. Skipped in boot-stub mode.
+    if lnd_client.is_connected() {
+        let sweep_app = app.clone();
+        let sweep_dispatcher = invoice_dispatcher.clone();
+        let sweep_cancel = cancel.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = sweep_cancel.cancelled() => {
+                    info!("invoice subscription recovery sweep cancelled before completion");
+                }
+                result = run_invoice_subscription_recovery_sweep(sweep_app, sweep_dispatcher) => {
+                    if let Err(e) = result {
+                        warn!(error = %e, "invoice subscription recovery sweep failed");
                     }
                 }
             }
         });
-    }
-
-    // Re-spawn per-hash listeners for every open invoice. LND's
-    // SubscribeSingleInvoice emits the current state on subscribe, so
-    // transitions that fired during outage are picked up on the first
-    // message. Skipped in boot-stub mode — no LND to subscribe to.
-    if lnd_client.is_connected() {
-        if let Err(e) =
-            run_invoice_subscription_recovery_sweep(app.clone(), invoice_dispatcher.clone()).await
-        {
-            warn!(error = %e, "invoice subscription recovery sweep failed");
-        }
     } else {
         warn!("LND boot-stub mode: skipping invoice subscription recovery sweep");
     }

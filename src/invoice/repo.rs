@@ -57,8 +57,16 @@ impl Invoices {
 
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
-            let invoice = self.find_by_id(InvoiceId::from(row.id)).await?;
-            out.push(invoice);
+            let id = InvoiceId::from(row.id);
+            match self.find_by_id(id).await {
+                Ok(invoice) => out.push(invoice),
+                // Skip poisoned row so one can't abort the whole sweep on reboot
+                Err(e) => ::tracing::error!(
+                    invoice_id = %id,
+                    error = %e,
+                    "list_open_invoices: skipping invoice that failed to load"
+                ),
+            }
         }
         Ok(out)
     }

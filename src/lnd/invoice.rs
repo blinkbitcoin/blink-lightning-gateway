@@ -159,6 +159,14 @@ async fn drive_stream(
                         continue;
                     }
                 };
+                if update.payment_hash != payment_hash {
+                    warn!(
+                        subscribed = %payment_hash.to_hex(),
+                        received = %update.payment_hash.to_hex(),
+                        "subscribe_invoice: stream emitted an invoice for a different payment_hash; skipping"
+                    );
+                    continue;
+                }
                 let terminal = matches!(
                     update.state,
                     LndInvoiceState::Settled | LndInvoiceState::Canceled

@@ -44,7 +44,7 @@ gateway_serve_cmd = """\
 set -a
 [ -f ./.env.local ] && . ./.env.local
 set +a
-cargo run{flag} --bin blink-lightning-gateway
+SQLX_OFFLINE=true cargo run{flag} --bin blink-lightning-gateway
 """.format(flag=cargo_flag)
 
 # Kill any orphaned gateway from a previous session. Tilt's `local_resource`
@@ -53,9 +53,14 @@ cargo run{flag} --bin blink-lightning-gateway
 # SIGTERM handler completes its grace-window drain. Either way, the next
 # `tilt up` finds ports 6691 + 8080 occupied. The `|| true` keeps `cmd`
 # happy when there's nothing to kill.
+#
+# SQLX_OFFLINE=true: build against the committed `.sqlx/` query cache, same
+# as every Makefile target. Without it, a DATABASE_URL inherited from the
+# `tilt up` shell flips sqlx to online verification against gateway-pg,
+# which has no tables until the binary runs its migrations at serve time.
 gateway_build_cmd = (
     'pkill -9 -f "target/(release|debug)/blink-lightning-gateway" || true; ' +
-    'cargo build' + cargo_flag
+    'SQLX_OFFLINE=true cargo build' + cargo_flag
 )
 
 local_resource(
