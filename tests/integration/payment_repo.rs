@@ -60,7 +60,7 @@ async fn update_in_op_persists_pending_event_and_state_transition() {
     let mut tx = pool.begin().await.unwrap();
     match payment.mark_pending(Timestamp::now()).expect("pending") {
         Idempotent::Executed(()) => {}
-        Idempotent::Ignored => panic!("first mark_pending should execute"),
+        Idempotent::AlreadyApplied => panic!("first mark_pending should execute"),
     }
     payments
         .update_in_op(&mut tx, &mut payment)
@@ -86,7 +86,7 @@ async fn update_in_op_persists_pending_event_and_state_transition() {
         .expect("settle")
     {
         Idempotent::Executed(()) => {}
-        Idempotent::Ignored => panic!("first settle should execute"),
+        Idempotent::AlreadyApplied => panic!("first settle should execute"),
     }
     payments
         .update_in_op(&mut tx, &mut reloaded)

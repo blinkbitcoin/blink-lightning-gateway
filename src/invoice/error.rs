@@ -7,9 +7,9 @@
 
 use thiserror::Error;
 
-use crate::primitives::PaymentHash;
-
 use super::entity::InvoiceState;
+use super::repo::{InvoiceCreateError, InvoiceFindError, InvoiceModifyError, InvoiceQueryError};
+use crate::primitives::PaymentHash;
 
 #[derive(Debug, Error)]
 pub enum InvoiceError {
@@ -25,9 +25,15 @@ pub enum InvoiceError {
         attempted: &'static str,
     },
 
-    // `EsRepoError` already wraps `sqlx::Error`, `EsEntityError`, and
-    // `CursorDestructureError` internally — no need for separate variants
-    // for those.
     #[error(transparent)]
-    EsRepo(#[from] es_entity::EsRepoError),
+    InvoiceCreate(#[from] InvoiceCreateError),
+    #[error(transparent)]
+    InvoiceModify(#[from] InvoiceModifyError),
+    #[error(transparent)]
+    InvoiceFind(#[from] InvoiceFindError),
+    #[error(transparent)]
+    InvoiceQuery(#[from] InvoiceQueryError),
+
+    #[error(transparent)]
+    Sqlx(#[from] sqlx::Error),
 }

@@ -5,10 +5,7 @@
 use chrono::Utc;
 use es_entity::Idempotent;
 
-use crate::app::helpers::{
-    hops_to_json, is_concurrent_modification, is_payment_hash_unique_violation,
-    lnd_error_to_failure_reason,
-};
+use crate::app::helpers::{hops_to_json, is_concurrent_modification, lnd_error_to_failure_reason};
 use crate::app::{decode, App, AppError, SendPaymentRequest};
 use crate::fees::LnFees;
 use crate::lnd::{SendPaymentParams, SendPaymentStatus};
@@ -75,17 +72,11 @@ impl App {
         let bolt_invoice = decoded.bolt_invoice.clone();
         let new_payment = NewPayment::try_new(decoded, request.wallet_id, None, max_fee_msat, now)?;
         let mut tx = self.pool.begin().await?;
-        let payment = match self.payments.create_in_op(&mut tx, new_payment).await {
-            Ok(p) => p,
-            Err(e) => {
-                if is_payment_hash_unique_violation(&e) {
-                    return Err(AppError::Payment(PaymentError::AlreadyPaid {
-                        payment_hash: payment_hash.to_hex(),
-                    }));
-                }
-                return Err(PaymentError::from(e).into());
-            }
-        };
+        let payment = self
+            .payments
+            .create_in_op(&mut tx, new_payment)
+            .await
+            .map_err(PaymentError::from)?;
         tx.commit().await?;
 
         // 5. Symphony authorize. STUB(story-2.5): real
@@ -273,7 +264,7 @@ impl App {
     ) -> Result<Payment, AppError> {
         match payment.mark_pending(now)? {
             Idempotent::Executed(()) => {}
-            Idempotent::Ignored => {
+            Idempotent::AlreadyApplied => {
                 ::tracing::info!(
                     payment_hash = %payment_hash.to_hex(),
                     current_state = %payment.state,
@@ -346,7 +337,7 @@ impl App {
         // persists both atomically.
         match payment.mark_pending(now)? {
             Idempotent::Executed(()) => {}
-            Idempotent::Ignored => {
+            Idempotent::AlreadyApplied => {
                 ::tracing::info!(
                     payment_hash = %payment_hash.to_hex(),
                     current_state = %payment.state,
@@ -356,7 +347,7 @@ impl App {
         }
         match payment.settle(preimage, fees_paid_msat, route_hops.clone(), now)? {
             Idempotent::Executed(()) => {}
-            Idempotent::Ignored => {
+            Idempotent::AlreadyApplied => {
                 ::tracing::info!(
                     payment_hash = %payment_hash.to_hex(),
                     current_state = %payment.state,
@@ -426,7 +417,7 @@ impl App {
         let reason_detail = failure_reason.detail_str();
         match payment.mark_pending(now)? {
             Idempotent::Executed(()) => {}
-            Idempotent::Ignored => {
+            Idempotent::AlreadyApplied => {
                 ::tracing::info!(
                     payment_hash = %payment_hash.to_hex(),
                     current_state = %payment.state,
@@ -436,7 +427,7 @@ impl App {
         }
         match payment.fail(failure_reason, now)? {
             Idempotent::Executed(()) => {}
-            Idempotent::Ignored => {
+            Idempotent::AlreadyApplied => {
                 ::tracing::info!(
                     payment_hash = %payment_hash.to_hex(),
                     current_state = %payment.state,

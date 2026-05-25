@@ -11,12 +11,14 @@
 //!
 //! Return is `Result<Idempotent<()>, PaymentError>`:
 //! - `Ok(Idempotent::Executed(()))` — first application; caller persists.
-//! - `Ok(Idempotent::Ignored)` — duplicate replay (LND stream reconnect).
+//! - `Ok(Idempotent::AlreadyApplied)` — duplicate replay (LND stream reconnect).
 //! - `Err(InvalidStateTransition)` — genuine contradiction (e.g. settle
 //!   after a Failed event).
 
+use derive_builder::Builder;
 use es_entity::{
-    idempotency_guard, EntityEvents, EsEntity, EsEntityError, Idempotent, IntoEvents, TryFromEvents,
+    idempotency_guard, EntityEvents, EntityHydrationError, EsEntity, Idempotent, IntoEvents,
+    TryFromEvents,
 };
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -153,17 +155,22 @@ impl IntoEvents<PaymentEvent> for NewPayment {
     }
 }
 
-#[derive(EsEntity)]
+#[derive(EsEntity, Builder)]
+#[builder(pattern = "owned", build_fn(error = "EntityHydrationError"))]
 pub struct Payment {
     pub id: PaymentId,
     pub payment_hash: PaymentHash,
     pub wallet_id: WalletId,
     pub amount_msat: MilliSatoshi,
     pub max_fee_msat: MilliSatoshi,
+    #[builder(default = "PaymentState::Initiated")]
     pub state: PaymentState,
+    #[builder(default)]
     pub fees_paid_msat: Option<MilliSatoshi>,
+    #[builder(default)]
     pub payment_preimage: Option<Preimage>,
     pub initiated_at: Timestamp,
+    #[builder(default)]
     pub settled_at: Option<Timestamp>,
     events: EntityEvents<PaymentEvent>,
 }
@@ -193,7 +200,7 @@ impl Payment {
             PaymentState::Pending => {
                 // Duplicate IN_FLIGHT replay — projection already Pending,
                 // log already contains the Pending event. No-op.
-                idempotency_guard!(self.events.iter_all().rev(), PaymentEvent::Pending { .. });
+                idempotency_guard!(self.events.iter_all().rev(), already_applied: PaymentEvent::Pending { .. });
                 // Unreachable in practice (projection Pending implies the
                 // event is present); included for completeness.
                 self.events.push(PaymentEvent::Pending { sent_at });
@@ -222,7 +229,7 @@ impl Payment {
         route_hops: Vec<Hop>,
         settled_at: Timestamp,
     ) -> Result<Idempotent<()>, PaymentError> {
-        idempotency_guard!(self.events.iter_all().rev(), PaymentEvent::Completed { .. });
+        idempotency_guard!(self.events.iter_all().rev(), already_applied: PaymentEvent::Completed { .. });
         if !matches!(self.state, PaymentState::Initiated | PaymentState::Pending) {
             return Err(PaymentError::InvalidStateTransition {
                 from: self.state,
@@ -252,7 +259,7 @@ impl Payment {
         failure_reason: FailureReason,
         failed_at: Timestamp,
     ) -> Result<Idempotent<()>, PaymentError> {
-        idempotency_guard!(self.events.iter_all().rev(), PaymentEvent::Failed { .. });
+        idempotency_guard!(self.events.iter_all().rev(), already_applied: PaymentEvent::Failed { .. });
         if !matches!(self.state, PaymentState::Initiated | PaymentState::Pending) {
             return Err(PaymentError::InvalidStateTransition {
                 from: self.state,
@@ -277,7 +284,7 @@ impl Payment {
         reason: String,
         reversed_at: Timestamp,
     ) -> Result<Idempotent<()>, PaymentError> {
-        idempotency_guard!(self.events.iter_all().rev(), PaymentEvent::Reversed { .. });
+        idempotency_guard!(self.events.iter_all().rev(), already_applied: PaymentEvent::Reversed { .. });
         if !matches!(self.state, PaymentState::Completed) {
             return Err(PaymentError::InvalidStateTransition {
                 from: self.state,
@@ -313,78 +320,54 @@ impl fmt::Debug for Payment {
 }
 
 impl TryFromEvents<PaymentEvent> for Payment {
-    fn try_from_events(events: EntityEvents<PaymentEvent>) -> Result<Self, EsEntityError> {
-        let id = *events.id();
-        let mut iter = events.iter_all();
-        let first = iter.next().ok_or_else(|| {
-            ::tracing::warn!(
-                payment_id = %id,
-                "payment event log is empty — treating as NotFound"
-            );
-            EsEntityError::NotFound
-        })?;
-        let PaymentEvent::Initiated {
-            payment_hash,
-            wallet_id,
-            amount_msat,
-            max_fee_msat,
-            initiated_at,
-            ..
-        } = first
-        else {
-            ::tracing::error!(
-                payment_id = %id,
-                "payment event log does not start with Initiated — CORRUPT LOG; surfacing as NotFound"
-            );
-            return Err(EsEntityError::NotFound);
-        };
+    fn try_from_events(events: EntityEvents<PaymentEvent>) -> Result<Self, EntityHydrationError> {
+        let mut builder = PaymentBuilder::default().id(*events.id());
 
-        let mut state = PaymentState::Initiated;
-        let mut fees_paid_msat: Option<MilliSatoshi> = None;
-        let mut payment_preimage: Option<Preimage> = None;
-        let mut settled_at: Option<Timestamp> = None;
-
-        for ev in iter {
+        for ev in events.iter_all() {
             match ev {
-                PaymentEvent::Pending { .. } => state = PaymentState::Pending,
-                PaymentEvent::Completed {
-                    settled_at: s,
-                    payment_preimage: p,
-                    fees_paid_msat: f,
+                PaymentEvent::Initiated {
+                    payment_hash,
+                    wallet_id,
+                    amount_msat,
+                    max_fee_msat,
+                    initiated_at,
                     ..
                 } => {
-                    state = PaymentState::Completed;
-                    settled_at = Some(*s);
-                    payment_preimage = Some(*p);
-                    fees_paid_msat = Some(*f);
+                    builder = builder
+                        .payment_hash(*payment_hash)
+                        .wallet_id(*wallet_id)
+                        .amount_msat(*amount_msat)
+                        .max_fee_msat(*max_fee_msat)
+                        .initiated_at(*initiated_at);
                 }
-                PaymentEvent::Failed { .. } => state = PaymentState::Failed,
-                PaymentEvent::Reversed { .. } => state = PaymentState::Reversed,
-                PaymentEvent::Initiated { .. } => {
-                    // Duplicate init — CORRUPT log. es-entity 0.9.5's
-                    // `EsEntityError` has no `CorruptEventLog` variant.
-                    ::tracing::error!(
-                        payment_id = %id,
-                        "payment event log contains duplicate Initiated — CORRUPT LOG; surfacing as NotFound"
-                    );
-                    return Err(EsEntityError::NotFound);
+                PaymentEvent::Pending { .. } => {
+                    builder = builder.state(PaymentState::Pending);
+                }
+                PaymentEvent::Completed {
+                    settled_at,
+                    payment_preimage,
+                    fees_paid_msat,
+                    ..
+                } => {
+                    builder = builder
+                        .state(PaymentState::Completed)
+                        .settled_at(Some(*settled_at))
+                        .payment_preimage(Some(*payment_preimage))
+                        .fees_paid_msat(Some(*fees_paid_msat));
+                }
+                PaymentEvent::Failed { .. } => {
+                    builder = builder.state(PaymentState::Failed);
+                }
+                PaymentEvent::Reversed { .. } => {
+                    builder = builder.state(PaymentState::Reversed);
                 }
             }
         }
 
-        Ok(Payment {
-            id,
-            payment_hash: *payment_hash,
-            wallet_id: *wallet_id,
-            amount_msat: *amount_msat,
-            max_fee_msat: *max_fee_msat,
-            state,
-            fees_paid_msat,
-            payment_preimage,
-            initiated_at: *initiated_at,
-            settled_at,
-            events,
-        })
+        // `build()` returns `EntityHydrationError::UninitializedFieldError(...)`
+        // on missing required fields — covers both empty-events and the
+        // first-event-isn't-Initiated corrupt-log case without panics.
+        builder.events(events).build()
     }
 }
 
@@ -623,7 +606,7 @@ mod tests {
             PaymentState::Pending,
         );
         let outcome = p.mark_pending(fixed_now()).unwrap();
-        assert!(matches!(outcome, Idempotent::Ignored));
+        assert!(matches!(outcome, Idempotent::AlreadyApplied));
     }
 
     #[test]
@@ -657,7 +640,7 @@ mod tests {
                 fixed_now(),
             )
             .unwrap();
-        assert!(matches!(outcome, Idempotent::Ignored));
+        assert!(matches!(outcome, Idempotent::AlreadyApplied));
     }
 
     #[test]
@@ -665,7 +648,7 @@ mod tests {
         let mut p = fresh_payment();
         push_event(&mut p, sample_failed_event(), PaymentState::Failed);
         let outcome = p.fail(FailureReason::Timeout, fixed_now()).unwrap();
-        assert!(matches!(outcome, Idempotent::Ignored));
+        assert!(matches!(outcome, Idempotent::AlreadyApplied));
     }
 
     #[test]
@@ -676,7 +659,7 @@ mod tests {
         push_event(&mut p, sample_completed_event(), PaymentState::Completed);
         push_event(&mut p, sample_reversed_event(), PaymentState::Reversed);
         let outcome = p.reverse("dispute".to_owned(), fixed_now()).unwrap();
-        assert!(matches!(outcome, Idempotent::Ignored));
+        assert!(matches!(outcome, Idempotent::AlreadyApplied));
     }
 
     // ---- genuine contradictions still surface as errors ------------------

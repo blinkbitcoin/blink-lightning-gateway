@@ -5,8 +5,10 @@
 //! `create`) cannot fail. The `Open → Held / Settled / Canceled` state
 //! machine uses the same `idempotency_guard!` shape as `Payment`.
 
+use derive_builder::Builder;
 use es_entity::{
-    idempotency_guard, EntityEvents, EsEntity, EsEntityError, Idempotent, IntoEvents, TryFromEvents,
+    idempotency_guard, EntityEvents, EntityHydrationError, EsEntity, Idempotent, IntoEvents,
+    TryFromEvents,
 };
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -138,7 +140,8 @@ impl IntoEvents<InvoiceEvent> for NewInvoice {
 
 /// Hydrated invoice aggregate. Constructed from the event log via
 /// `TryFromEvents`; never built directly outside this module.
-#[derive(EsEntity)]
+#[derive(EsEntity, Builder)]
+#[builder(pattern = "owned", build_fn(error = "EntityHydrationError"))]
 pub struct Invoice {
     pub id: InvoiceId,
     pub payment_hash: PaymentHash,
@@ -146,9 +149,12 @@ pub struct Invoice {
     pub amount_msat: MilliSatoshi,
     pub expiry_at: Timestamp,
     pub bolt_invoice: BoltInvoice,
+    #[builder(default = "InvoiceState::Open")]
     pub state: InvoiceState,
     pub created_at: Timestamp,
+    #[builder(default)]
     pub payment_preimage: Option<Preimage>,
+    #[builder(default)]
     pub canceled_reason: Option<CancelReason>,
     events: EntityEvents<InvoiceEvent>,
 }
@@ -166,7 +172,7 @@ impl Invoice {
         htlc_amount_msat: MilliSatoshi,
         held_at: Timestamp,
     ) -> Result<Idempotent<()>, InvoiceError> {
-        idempotency_guard!(self.events.iter_all().rev(), InvoiceEvent::HtlcHeld { .. });
+        idempotency_guard!(self.events.iter_all().rev(), already_applied: InvoiceEvent::HtlcHeld { .. });
         if !matches!(self.state, InvoiceState::Open) {
             return Err(InvoiceError::InvalidStateTransition {
                 from: self.state,
@@ -190,7 +196,7 @@ impl Invoice {
         payment_preimage: Preimage,
         settled_at: Timestamp,
     ) -> Result<Idempotent<()>, InvoiceError> {
-        idempotency_guard!(self.events.iter_all().rev(), InvoiceEvent::Settled { .. });
+        idempotency_guard!(self.events.iter_all().rev(), already_applied: InvoiceEvent::Settled { .. });
         if !matches!(self.state, InvoiceState::Open | InvoiceState::Held) {
             return Err(InvoiceError::InvalidStateTransition {
                 from: self.state,
@@ -213,7 +219,7 @@ impl Invoice {
         reason: CancelReason,
         canceled_at: Timestamp,
     ) -> Result<Idempotent<()>, InvoiceError> {
-        idempotency_guard!(self.events.iter_all().rev(), InvoiceEvent::Canceled { .. });
+        idempotency_guard!(self.events.iter_all().rev(), already_applied: InvoiceEvent::Canceled { .. });
         if !matches!(self.state, InvoiceState::Open | InvoiceState::Held) {
             return Err(InvoiceError::InvalidStateTransition {
                 from: self.state,
@@ -252,67 +258,51 @@ impl fmt::Debug for Invoice {
 }
 
 impl TryFromEvents<InvoiceEvent> for Invoice {
-    fn try_from_events(events: EntityEvents<InvoiceEvent>) -> Result<Self, EsEntityError> {
-        let id = *events.id();
-        let mut iter = events.iter_all();
-        let first = iter.next().ok_or(EsEntityError::NotFound)?;
-        let InvoiceEvent::Created {
-            payment_hash,
-            wallet_id,
-            amount_msat,
-            expiry_at,
-            bolt_invoice,
-            created_at,
-        } = first
-        else {
-            ::tracing::error!(
-                invoice_id = %id,
-                "invoice event log does not start with Created — CORRUPT LOG; surfacing as NotFound"
-            );
-            return Err(EsEntityError::NotFound);
-        };
+    fn try_from_events(events: EntityEvents<InvoiceEvent>) -> Result<Self, EntityHydrationError> {
+        let mut builder = InvoiceBuilder::default().id(*events.id());
 
-        let mut state = InvoiceState::Open;
-        let mut payment_preimage: Option<Preimage> = None;
-        let mut canceled_reason: Option<CancelReason> = None;
-
-        for ev in iter {
+        for ev in events.iter_all() {
             match ev {
-                InvoiceEvent::Created { .. } => {
-                    ::tracing::error!(
-                        invoice_id = %id,
-                        "invoice event log contains duplicate Created — CORRUPT LOG; surfacing as NotFound"
-                    );
-                    return Err(EsEntityError::NotFound);
-                }
-                InvoiceEvent::HtlcHeld { .. } => state = InvoiceState::Held,
-                InvoiceEvent::Settled {
-                    payment_preimage: p,
-                    ..
+                InvoiceEvent::Created {
+                    payment_hash,
+                    wallet_id,
+                    amount_msat,
+                    expiry_at,
+                    bolt_invoice,
+                    created_at,
                 } => {
-                    state = InvoiceState::Settled;
-                    payment_preimage = Some(*p);
+                    builder = builder
+                        .payment_hash(*payment_hash)
+                        .wallet_id(*wallet_id)
+                        .amount_msat(*amount_msat)
+                        .expiry_at(*expiry_at)
+                        .bolt_invoice(bolt_invoice.clone())
+                        .created_at(*created_at);
+                }
+                InvoiceEvent::HtlcHeld { .. } => {
+                    builder = builder.state(InvoiceState::Held);
+                }
+                InvoiceEvent::Settled {
+                    payment_preimage, ..
+                } => {
+                    builder = builder
+                        .state(InvoiceState::Settled)
+                        .payment_preimage(Some(*payment_preimage));
                 }
                 InvoiceEvent::Canceled { reason, .. } => {
-                    state = InvoiceState::Canceled;
-                    canceled_reason = Some(reason.clone());
+                    builder = builder
+                        .state(InvoiceState::Canceled)
+                        .canceled_reason(Some(reason.clone()));
                 }
             }
         }
 
-        Ok(Invoice {
-            id,
-            payment_hash: *payment_hash,
-            wallet_id: *wallet_id,
-            amount_msat: *amount_msat,
-            expiry_at: *expiry_at,
-            bolt_invoice: bolt_invoice.clone(),
-            state,
-            created_at: *created_at,
-            payment_preimage,
-            canceled_reason,
-            events,
-        })
+        // `build()` returns `Err(EntityHydrationError::UninitializedFieldError(...))`
+        // if any non-`#[builder(default)]` field wasn't populated by the event
+        // stream — that covers both the empty-events case AND the
+        // first-event-isn't-Created corrupt-log case (no `payment_hash` etc.
+        // ever set). No panics needed.
+        builder.events(events).build()
     }
 }
 
@@ -407,11 +397,19 @@ mod tests {
     }
 
     #[test]
-    fn try_from_events_with_no_events_returns_not_found() {
+    fn try_from_events_with_no_events_returns_uninitialized_field_error() {
+        // With the builder-pattern try_from_events, an empty event log surfaces as
+        // `EntityHydrationError::UninitializedFieldError` because no event
+        // ever populated the required `payment_hash` / `wallet_id` / etc.
+        // fields. Same graceful error path covers the "first event is not
+        // Created" corrupt-log case.
         let id = InvoiceId::new();
         let empty: EntityEvents<InvoiceEvent> = EntityEvents::init(id, std::iter::empty());
         let err = Invoice::try_from_events(empty).unwrap_err();
-        assert!(matches!(err, EsEntityError::NotFound));
+        assert!(matches!(
+            err,
+            EntityHydrationError::UninitializedFieldError(_)
+        ));
     }
 
     // ---- Story 2.3: command-method state machine ----------------------
@@ -507,7 +505,7 @@ mod tests {
         let outcome = inv
             .mark_held(MilliSatoshi::new(1_000_000), fixed_now())
             .unwrap();
-        assert!(matches!(outcome, Idempotent::Ignored));
+        assert!(matches!(outcome, Idempotent::AlreadyApplied));
     }
 
     #[test]
@@ -515,7 +513,7 @@ mod tests {
         let mut inv = fresh_invoice();
         push_event(&mut inv, sample_settled_event(), InvoiceState::Settled);
         let outcome = inv.settle(Preimage::from([0xee; 32]), fixed_now()).unwrap();
-        assert!(matches!(outcome, Idempotent::Ignored));
+        assert!(matches!(outcome, Idempotent::AlreadyApplied));
     }
 
     #[test]
@@ -523,7 +521,7 @@ mod tests {
         let mut inv = fresh_invoice();
         push_event(&mut inv, sample_canceled_event(), InvoiceState::Canceled);
         let outcome = inv.cancel(CancelReason::Expired, fixed_now()).unwrap();
-        assert!(matches!(outcome, Idempotent::Ignored));
+        assert!(matches!(outcome, Idempotent::AlreadyApplied));
     }
 
     // ---- genuine contradictions -----------------------------------------

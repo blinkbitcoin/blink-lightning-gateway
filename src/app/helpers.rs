@@ -4,36 +4,26 @@
 //! method on `App` (still stubbed for Story 2.5) but lives here so all
 //! per-use-case files can call it without each owning its own copy.
 
-use es_entity::{EsEntityError, EsRepoError};
-
 use crate::app::{App, AppError};
+use crate::invoice::repo::InvoiceFindError;
 use crate::lnd::LndError;
+use crate::payment::repo::{PaymentFindError, PaymentModifyError};
 use crate::payment::{FailureReason, Hop};
 use crate::primitives::WalletId;
 
-/// Inspect an `EsRepoError` to detect a UNIQUE-violation on the
-/// `payments.payment_hash` column. Two attempts to insert a payment for
-/// the same hash collide on this constraint; surfacing as a distinct
-/// `AlreadyPaid` error gives the GraphQL resolver a clean enum to map.
-pub(crate) fn is_payment_hash_unique_violation(err: &EsRepoError) -> bool {
-    match err {
-        EsRepoError::Sqlx(sqlx::Error::Database(db)) => db.is_unique_violation(),
-        _ => false,
-    }
-}
-
-/// Detect concurrent-modification on an `EsRepoError`. Used by the sync
+/// Detect concurrent-modification on a Payment modify. Used by the sync
 /// `send_payment` path to retry once when the subscription handler beats
 /// us to the projection update for the same payment.
-pub(crate) fn is_concurrent_modification(err: &EsRepoError) -> bool {
-    matches!(
-        err,
-        EsRepoError::EsEntityError(EsEntityError::ConcurrentModification)
-    )
+pub(crate) fn is_concurrent_modification(err: &PaymentModifyError) -> bool {
+    matches!(err, PaymentModifyError::ConcurrentModification)
 }
 
-pub(crate) fn is_es_not_found(err: &EsRepoError) -> bool {
-    matches!(err, EsRepoError::EsEntityError(EsEntityError::NotFound))
+pub(crate) fn is_payment_not_found(err: &PaymentFindError) -> bool {
+    matches!(err, PaymentFindError::NotFound { .. })
+}
+
+pub(crate) fn is_invoice_not_found(err: &InvoiceFindError) -> bool {
+    matches!(err, InvoiceFindError::NotFound { .. })
 }
 
 pub(crate) fn hops_to_json(route_hops: &[Hop]) -> Vec<serde_json::Value> {

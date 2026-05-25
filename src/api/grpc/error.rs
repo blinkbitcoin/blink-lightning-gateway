@@ -40,14 +40,18 @@ impl From<AppError> for Status {
         match err {
             AppError::WalletOwnership(msg) => Status::permission_denied(msg),
             AppError::Invoice(inner) => Status::invalid_argument(inner.to_string()),
-            // PaymentError covers a mix of caller-visible validation
-            // failures and infra/concurrency failures wrapped via
-            // `EsRepoError`. Surface the latter as `unavailable` (the
-            // gRPC contract for retryable errors) so a transient DB
-            // hiccup or ConcurrentModification doesn't look like client
-            // misuse.
-            AppError::Payment(crate::payment::PaymentError::EsRepo(inner)) => {
-                ::tracing::error!(error = %inner, "payment EsRepo error surfaced to gRPC layer");
+            // PaymentError covers a mix of caller-visible validation failures
+            // and infra/concurrency failures. The es-entity 0.10 per-operation
+            // error types + Sqlx/Hydration variants are all infra-flavoured;
+            // surface them as `unavailable` (the gRPC contract for retryable
+            // errors) so a transient DB hiccup or ConcurrentModification
+            // doesn't look like client misuse.
+            AppError::Payment(inner @ crate::payment::PaymentError::PaymentCreate(_))
+            | AppError::Payment(inner @ crate::payment::PaymentError::PaymentModify(_))
+            | AppError::Payment(inner @ crate::payment::PaymentError::PaymentFind(_))
+            | AppError::Payment(inner @ crate::payment::PaymentError::PaymentQuery(_))
+            | AppError::Payment(inner @ crate::payment::PaymentError::Sqlx(_)) => {
+                ::tracing::error!(error = %inner, "payment infra error surfaced to gRPC layer");
                 Status::unavailable(inner.to_string())
             }
             AppError::Payment(inner) => Status::invalid_argument(inner.to_string()),

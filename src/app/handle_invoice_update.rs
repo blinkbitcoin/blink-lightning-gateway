@@ -10,7 +10,7 @@ use es_entity::Idempotent;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::app::helpers::is_es_not_found;
+use crate::app::helpers::is_invoice_not_found;
 use crate::app::{App, AppError};
 use crate::invoice::event::CancelReason;
 use crate::invoice::{Invoice, InvoiceError};
@@ -180,7 +180,7 @@ impl App {
             .await
         {
             Ok(i) => i,
-            Err(e) if is_es_not_found(&e) => {
+            Err(e) if is_invoice_not_found(&e) => {
                 ::tracing::debug!(
                     payment_hash = %update.payment_hash.to_hex(),
                     "invoice subscription update for unknown payment_hash; ignoring"
@@ -243,7 +243,7 @@ impl App {
         let wallet_id = invoice.wallet_id;
         match invoice.mark_held(htlc_amount_msat, now)? {
             Idempotent::Executed(()) => {}
-            Idempotent::Ignored => {
+            Idempotent::AlreadyApplied => {
                 ::tracing::info!(
                     payment_hash = %payment_hash.to_hex(),
                     current_state = %invoice.state,
@@ -289,7 +289,7 @@ impl App {
         let wallet_id = invoice.wallet_id;
         match invoice.settle(preimage, now)? {
             Idempotent::Executed(()) => {}
-            Idempotent::Ignored => {
+            Idempotent::AlreadyApplied => {
                 ::tracing::info!(
                     payment_hash = %payment_hash.to_hex(),
                     current_state = %invoice.state,
@@ -338,7 +338,7 @@ impl App {
         let reason_for_outbox = reason.clone();
         match invoice.cancel(reason, now)? {
             Idempotent::Executed(()) => {}
-            Idempotent::Ignored => {
+            Idempotent::AlreadyApplied => {
                 ::tracing::info!(
                     payment_hash = %payment_hash.to_hex(),
                     current_state = %invoice.state,

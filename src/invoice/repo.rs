@@ -52,8 +52,7 @@ impl Invoices {
     pub async fn list_open_invoices(&self) -> Result<Vec<Invoice>, super::InvoiceError> {
         let rows = sqlx::query!(r#"SELECT id FROM invoices WHERE state IN ('open', 'held')"#)
             .fetch_all(&self.pool)
-            .await
-            .map_err(es_entity::EsRepoError::Sqlx)?;
+            .await?;
 
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {

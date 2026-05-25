@@ -6,7 +6,7 @@
 use chrono::Utc;
 use es_entity::Idempotent;
 
-use crate::app::helpers::{hops_to_json, is_es_not_found};
+use crate::app::helpers::{hops_to_json, is_payment_not_found};
 use crate::app::{App, AppError};
 use crate::lnd::{PaymentUpdate, SendPaymentStatus};
 use crate::outbox::NewOutboxEvent;
@@ -16,7 +16,7 @@ use crate::primitives::{MilliSatoshi, PaymentHash, Preimage, Timestamp};
 impl App {
     /// Subscription-driven update from LND's `Router/TrackPayments`
     /// stream. Idempotent against duplicates — the entity-level
-    /// `Idempotent::Ignored` outcome short-circuits the transition
+    /// `Idempotent::AlreadyApplied` outcome short-circuits the transition
     /// helpers, and an `InvalidStateTransition` (genuine contradiction)
     /// is surfaced as an error rather than silently swallowed.
     ///
@@ -32,7 +32,7 @@ impl App {
             .await
         {
             Ok(p) => p,
-            Err(e) if is_es_not_found(&e) => {
+            Err(e) if is_payment_not_found(&e) => {
                 ::tracing::debug!(
                     payment_hash = %update.payment_hash.to_hex(),
                     "subscription update for unknown payment_hash; ignoring (likely sibling gateway or pre-existing LND payment)"
@@ -129,7 +129,7 @@ impl App {
     ) -> Result<Payment, AppError> {
         match payment.settle(preimage, fees_paid_msat, route_hops.clone(), now)? {
             Idempotent::Executed(()) => {}
-            Idempotent::Ignored => {
+            Idempotent::AlreadyApplied => {
                 ::tracing::info!(
                     payment_hash = %payment_hash.to_hex(),
                     current_state = %payment.state,
@@ -177,7 +177,7 @@ impl App {
         let reason_detail = failure_reason.detail_str();
         match payment.fail(failure_reason, now)? {
             Idempotent::Executed(()) => {}
-            Idempotent::Ignored => {
+            Idempotent::AlreadyApplied => {
                 ::tracing::info!(
                     payment_hash = %payment_hash.to_hex(),
                     current_state = %payment.state,

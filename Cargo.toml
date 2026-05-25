@@ -12,7 +12,8 @@ tokio-postgres = "0.7"
 tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["rt"] }
 axum = { version = "0.8", features = ["macros"] }
-es-entity = "0.9.5"
+es-entity = "0.10"
+derive_builder = "0.20"
 opentelemetry = "0.31.0"
 tracing = "0.1"
 async-trait = "0.1"

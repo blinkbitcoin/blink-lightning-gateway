@@ -3,6 +3,9 @@
 use thiserror::Error;
 
 use super::entity::PaymentState;
+use super::repo::{
+    PaymentColumn, PaymentCreateError, PaymentFindError, PaymentModifyError, PaymentQueryError,
+};
 
 #[derive(Debug, Error)]
 pub enum PaymentError {
@@ -40,5 +43,31 @@ pub enum PaymentError {
     CorruptEventLog,
 
     #[error(transparent)]
-    EsRepo(#[from] es_entity::EsRepoError),
+    PaymentCreate(PaymentCreateError),
+    #[error(transparent)]
+    PaymentModify(#[from] PaymentModifyError),
+    #[error(transparent)]
+    PaymentFind(#[from] PaymentFindError),
+    #[error(transparent)]
+    PaymentQuery(#[from] PaymentQueryError),
+
+    #[error(transparent)]
+    Sqlx(#[from] sqlx::Error),
+}
+
+// Intercept the `payment_hash` UNIQUE-violation on create and lift it into
+// the domain-meaningful `AlreadyPaid` variant.
+impl From<PaymentCreateError> for PaymentError {
+    fn from(error: PaymentCreateError) -> Self {
+        match error {
+            PaymentCreateError::ConstraintViolation {
+                column: Some(PaymentColumn::PaymentHash),
+                value,
+                ..
+            } => Self::AlreadyPaid {
+                payment_hash: value.unwrap_or_default(),
+            },
+            other => Self::PaymentCreate(other),
+        }
+    }
 }
