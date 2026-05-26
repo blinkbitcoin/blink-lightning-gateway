@@ -146,6 +146,9 @@ async fn list_open_invoices_returns_open_and_held_only() {
         )
         .await
         .expect("create settled");
+    let _ = settled
+        .mark_held(MilliSatoshi::new(3_000_000), Timestamp::now())
+        .unwrap();
     let _ = settled.settle(pre_settled, Timestamp::now()).unwrap();
     invoices
         .update(&mut settled)
@@ -191,6 +194,9 @@ async fn invoice_settled_event_hydrates_payment_preimage() {
     .unwrap();
     let mut invoice = invoices.create(new).await.expect("create");
 
+    let _ = invoice
+        .mark_held(MilliSatoshi::new(1_000_000), Timestamp::now())
+        .unwrap();
     let _ = invoice.settle(preimage, Timestamp::now()).unwrap();
     invoices.update(&mut invoice).await.expect("update");
 

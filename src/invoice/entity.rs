@@ -199,17 +199,15 @@ impl Invoice {
         Ok(Idempotent::Executed(()))
     }
 
-    /// `(Open|Held) → Settled` on LND `is_confirmed`. Idempotent on a
-    /// duplicate `Settled` event; a prior `Canceled` surfaces as
-    /// `InvalidStateTransition`. `Held` is accepted as a source state
-    /// for the future HODL settle-command path.
+    /// `Held → Settled`. Blink only uses hold invoice. Any other state other
+    /// than Held transition to Settled is invalid
     pub fn settle(
         &mut self,
         payment_preimage: Preimage,
         settled_at: Timestamp,
     ) -> Result<Idempotent<()>, InvoiceError> {
         idempotency_guard!(self.events.iter_all().rev(), already_applied: InvoiceEvent::Settled { .. });
-        if !matches!(self.state, InvoiceState::Open | InvoiceState::Held) {
+        if !matches!(self.state, InvoiceState::Held) {
             return Err(InvoiceError::InvalidStateTransition {
                 from: self.state,
                 attempted: "settle",
@@ -502,12 +500,16 @@ mod tests {
     }
 
     #[test]
-    fn settle_from_open_executes() {
+    fn settle_from_open_is_invalid_state_transition() {
         let mut inv = fresh_invoice();
-        let preimage = Preimage::from([0xee; 32]);
-        let outcome = inv.settle(preimage, fixed_now()).unwrap();
-        assert!(matches!(outcome, Idempotent::Executed(())));
-        assert_eq!(inv.state, InvoiceState::Settled);
+        match inv.settle(Preimage::from([0xee; 32]), fixed_now()) {
+            Err(InvoiceError::InvalidStateTransition {
+                from: InvoiceState::Open,
+                attempted: "settle",
+            }) => {}
+            Err(e) => panic!("expected InvalidStateTransition from Open, got error: {e:?}"),
+            Ok(_) => panic!("expected InvalidStateTransition from Open, got Ok"),
+        }
     }
 
     #[test]

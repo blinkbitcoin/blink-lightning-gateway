@@ -61,18 +61,14 @@ impl App {
             }
         }
 
-        // AC12: clearing event echoes the persisted parked amount so the
-        // outbox pending layer reconciles with the credit booked at Held.
+        // `Invoice::settle` requires `Held` as source state, and `mark_held`
+        // is the only path to `Held` and unconditionally sets
+        // `held_amount_msat = Some(..)`. Reaching this line implies the
+        // field is set.
         let amount_sat = invoice
             .held_amount_msat
-            .map(|m| m.whole_sat() as i64)
-            .unwrap_or_else(|| {
-                ::tracing::warn!(
-                    payment_hash = %payment_hash.to_hex(),
-                    "settle_hold_invoice: held_amount_msat absent; emitting amount_sat=0"
-                );
-                0
-            });
+            .expect("settle requires Held; mark_held sets held_amount_msat")
+            .whole_sat() as i64;
 
         let mut tx = self.pool.begin().await?;
         self.invoices

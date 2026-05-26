@@ -319,21 +319,16 @@ impl App {
             }
         }
 
-        // Settled events echo the persisted `held_amount_msat`
-        // so Symphony's pending-layer release matches the credit the
-        // `LightningHtlcHeld` event booked. For Open → Settled (no Held
-        // ever happened — should not occur on the HODL substrate but
-        // guarded against) fall through to 0 with a `warn!`.
+        // Settled events echo the persisted `held_amount_msat` so
+        // Symphony's pending-layer release matches the credit the
+        // `LightningHtlcHeld` event booked. `Invoice::settle` requires
+        // `Held` as source state, and `mark_held` is the only path to
+        // `Held` and unconditionally sets `held_amount_msat = Some(..)`
+        // — so reaching this line implies the field is set.
         let amount_sat = invoice
             .held_amount_msat
-            .map(|m| m.whole_sat() as i64)
-            .unwrap_or_else(|| {
-                ::tracing::warn!(
-                    payment_hash = %payment_hash.to_hex(),
-                    "settled invoice has no held_amount_msat; emitting amount_sat=0"
-                );
-                0
-            });
+            .expect("settle requires Held; mark_held sets held_amount_msat")
+            .whole_sat() as i64;
         let mut tx = self.pool.begin().await?;
         self.invoices
             .update_in_op(&mut tx, &mut invoice)

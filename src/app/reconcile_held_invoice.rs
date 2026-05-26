@@ -107,16 +107,13 @@ impl App {
             }
         }
 
+        // `Invoice::settle` requires `Held` as source state, and the
+        // outer `reconcile_held_invoice` only proceeds when `state == Held`
+        // (which `mark_held` always pairs with `held_amount_msat = Some(..)`).
         let amount_sat = invoice
             .held_amount_msat
-            .map(|m| m.whole_sat() as i64)
-            .unwrap_or_else(|| {
-                ::tracing::warn!(
-                    payment_hash = %payment_hash.to_hex(),
-                    "reconcile_to_settled: held_amount_msat absent; emitting amount_sat=0"
-                );
-                0
-            });
+            .expect("reconcile_to_settled runs only when state == Held; mark_held sets held_amount_msat")
+            .whole_sat() as i64;
 
         let mut tx = self.pool.begin().await?;
         self.invoices
