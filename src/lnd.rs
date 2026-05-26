@@ -11,8 +11,8 @@ pub use client::{LndApi, LndClient};
 pub use config::LndConfig;
 pub use error::LndError;
 pub use invoice::{
-    subscribe_invoice, AddInvoiceParams, AddInvoiceResponse, InvoiceUpdate, LndInvoiceState,
-    SubscribeInvoiceExit,
+    subscribe_invoice, AddHoldInvoiceParams, AddHoldInvoiceResponse, InvoiceUpdate,
+    LndInvoiceState, SubscribeInvoiceExit,
 };
 pub use payment::{
     FeeProbeParams, FeeProbeResponse, SendPaymentParams, SendPaymentResponse, SendPaymentStatus,

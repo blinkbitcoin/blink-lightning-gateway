@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT payment_hash as \"payment_hash: PaymentHash\"\n               FROM invoices\n               WHERE state = 'held'\n               LIMIT $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "payment_hash: PaymentHash",
+        "type_info": "Bytea"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "a2931ba6f84be8bf97e5fc339aa783ff9d80ebae06cfa5c311faeda0fbbee73c"
+}

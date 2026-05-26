@@ -1,29 +1,37 @@
-//! `lnInvoiceCreate` use-case.
+//! `lnInvoiceCreate` use-case: every gateway invoice is a
+//! HODL invoice — the gateway generates the 32-byte preimage,
+//! derives `payment_hash = SHA256(preimage)`, and calls LND's
+//! `Invoices/AddHoldInvoice`.
 
 use crate::app::{App, AppError, Mode, NewInvoiceRequest};
 use crate::invoice::{Invoice, NewInvoice};
-use crate::lnd::AddInvoiceParams;
-use crate::primitives::Timestamp;
+use crate::lnd::AddHoldInvoiceParams;
+use crate::primitives::{Preimage, Timestamp};
 
 impl App {
-    /// `lnInvoiceCreate` use-case.
     pub async fn create_invoice(&self, request: NewInvoiceRequest) -> Result<Invoice, AppError> {
         let now = Timestamp::now();
         self.check_wallet_ownership(&request.wallet_id).await?;
 
+        // Gateway-owned preimage + derived payment_hash
+        let payment_preimage = Preimage::generate();
+        let payment_hash = payment_preimage.payment_hash();
+
         let lnd_resp = self
             .lnd
-            .add_invoice(AddInvoiceParams {
-                amount_msat: request.amount_msat,
+            .add_hold_invoice(AddHoldInvoiceParams {
+                payment_hash,
+                amount_msat: Some(request.amount_msat),
                 memo: request.memo,
                 expiry_seconds: request.expiry_seconds,
             })
             .await?;
 
         let new_invoice = NewInvoice::try_new(
-            lnd_resp.payment_hash,
+            payment_hash,
+            payment_preimage,
             request.wallet_id,
-            request.amount_msat,
+            Some(request.amount_msat),
             request.expiry_seconds,
             lnd_resp.bolt_invoice,
             now,

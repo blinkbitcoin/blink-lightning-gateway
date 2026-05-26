@@ -1,5 +1,9 @@
-//! `add_invoice` parameter + response types, plus the per-hash
+//! `AddHoldInvoice` parameter + response types, plus the per-hash
 //! `subscribe_invoice` listener.
+//!
+//! Story 2.4: every gateway invoice is a HODL invoice
+//! issued via LND's `Invoices/AddHoldInvoice`; the gateway owns the
+//! 32-byte preimage and supplies the SHA-256 hash to LND.
 //!
 //! Per-hash `SubscribeSingleInvoice` is the only invoice-observation
 //! path: LND's cluster-level `Lightning/SubscribeInvoices` drops
@@ -20,18 +24,23 @@ use crate::primitives::{BoltInvoice, MilliSatoshi, PaymentHash, Preimage};
 use super::client::LndClient;
 use super::error::LndError;
 
+/// Parameters for `LndApi::add_hold_invoice`. The `payment_hash` is an
+/// INPUT (gateway-supplied via SHA-256 of a gateway-owned preimage) —
+/// `AddHoldInvoice` does not mint a hash. `amount_msat: None` produces
+/// an amountless HODL invoice (LND treats `value_msat = 0` as amountless).
 #[derive(Clone, Debug)]
-pub struct AddInvoiceParams {
-    pub amount_msat: MilliSatoshi,
+pub struct AddHoldInvoiceParams {
+    pub payment_hash: PaymentHash,
+    pub amount_msat: Option<MilliSatoshi>,
     pub memo: Option<String>,
     pub expiry_seconds: u32,
 }
 
+/// LND's `AddHoldInvoiceResp` carries `payment_request` / `add_index` /
+/// `payment_addr`. The gateway only consumes `payment_request` — the
+/// hash is gateway-owned and the others aren't used outside LND.
 #[derive(Clone, Debug)]
-pub struct AddInvoiceResponse {
-    /// LND-generated 32-byte payment-hash. Source of truth — never
-    /// synthesize on the gateway side.
-    pub payment_hash: PaymentHash,
+pub struct AddHoldInvoiceResponse {
     /// BOLT11 invoice string returned by LND.
     pub bolt_invoice: BoltInvoice,
 }
@@ -261,9 +270,8 @@ mod tests {
     use super::*;
     use crate::lnd::client::{LndApi, MockLndApi};
 
-    fn canned_response() -> AddInvoiceResponse {
-        AddInvoiceResponse {
-            payment_hash: PaymentHash::from([0xab; 32]),
+    fn canned_response() -> AddHoldInvoiceResponse {
+        AddHoldInvoiceResponse {
             bolt_invoice: BoltInvoice::new("lnbc1u1pj..."),
         }
     }
@@ -271,20 +279,20 @@ mod tests {
     #[tokio::test]
     async fn mock_lnd_returns_canned_response() {
         let mut mock = MockLndApi::new();
-        mock.expect_add_invoice()
+        mock.expect_add_hold_invoice()
             .times(1)
             .returning(|_| Box::pin(async { Ok(canned_response()) }));
 
         let resp = mock
-            .add_invoice(AddInvoiceParams {
-                amount_msat: MilliSatoshi::new(1_000_000),
+            .add_hold_invoice(AddHoldInvoiceParams {
+                payment_hash: PaymentHash::from([0xab; 32]),
+                amount_msat: Some(MilliSatoshi::new(1_000_000)),
                 memo: Some("test".to_owned()),
                 expiry_seconds: 3600,
             })
             .await
             .unwrap();
 
-        assert_eq!(resp.payment_hash, PaymentHash::from([0xab; 32]));
         assert!(resp.bolt_invoice.as_str().starts_with("lnbc"));
     }
 

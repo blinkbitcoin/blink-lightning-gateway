@@ -206,7 +206,21 @@ impl App {
             }
             LndInvoiceState::Accepted => {
                 self.transition_to_held(invoice, payment_hash, update.htlc_amount_msat, now)
-                    .await
+                    .await?;
+                // STUB(story-2.5): business gate (wallet-ownership /
+                // price-lock checks) — always passes for now. Story 2.4's
+                // HODL substrate auto-settles every accepted HTLC so the
+                // gateway preserves "regular invoice" UX on top of the
+                // HODL path. galoy's `handleHeldInvoice` is the model.
+                if let Err(e) = self.settle_hold_invoice(payment_hash).await {
+                    ::tracing::error!(
+                        payment_hash = %payment_hash.to_hex(),
+                        error = %e,
+                        "settle_hold_invoice after Held transition failed; \
+                         invoice_reconciliation_sweep will apply LND's truth on next tick"
+                    );
+                }
+                Ok(())
             }
             LndInvoiceState::Settled => {
                 let preimage = update.payment_preimage.ok_or_else(|| {
@@ -253,7 +267,13 @@ impl App {
             }
         }
 
-        let amount_sat = invoice.amount_msat.whole_sat() as i64;
+        // The Held outbox event books a pending credit at the
+        // *parked HTLC amount*. The persisted `held_amount_msat` (set
+        // by `mark_held`) is what Settled / Canceled later echo, so the
+        // pending layer reconciles. For a fixed-amount invoice this
+        // equals `invoice.amount_msat`; for an amountless invoice it's
+        // the only correct source.
+        let amount_sat = htlc_amount_msat.whole_sat() as i64;
         let mut tx = self.pool.begin().await?;
         self.invoices
             .update_in_op(&mut tx, &mut invoice)
@@ -299,7 +319,21 @@ impl App {
             }
         }
 
-        let amount_sat = invoice.amount_msat.whole_sat() as i64;
+        // Settled events echo the persisted `held_amount_msat`
+        // so Symphony's pending-layer release matches the credit the
+        // `LightningHtlcHeld` event booked. For Open → Settled (no Held
+        // ever happened — should not occur on the HODL substrate but
+        // guarded against) fall through to 0 with a `warn!`.
+        let amount_sat = invoice
+            .held_amount_msat
+            .map(|m| m.whole_sat() as i64)
+            .unwrap_or_else(|| {
+                ::tracing::warn!(
+                    payment_hash = %payment_hash.to_hex(),
+                    "settled invoice has no held_amount_msat; emitting amount_sat=0"
+                );
+                0
+            });
         let mut tx = self.pool.begin().await?;
         self.invoices
             .update_in_op(&mut tx, &mut invoice)
@@ -348,10 +382,14 @@ impl App {
             }
         }
 
-        // A canceled / expired invoice moved no money — the standardized
-        // amount is 0. The original invoice amount stays on the invoice
-        // projection for anyone who needs it.
-        let amount_sat: i64 = 0;
+        // Clearing the pending layer requires emitting the same
+        // amount the Held event booked. `held_amount_msat.is_some()` is
+        // exactly the "was it ever held" discriminator: for a never-held
+        // (Open → Canceled) invoice no pending entry was booked.
+        let amount_sat = invoice
+            .held_amount_msat
+            .map(|m| m.whole_sat() as i64)
+            .unwrap_or(0);
         let mut tx = self.pool.begin().await?;
         self.invoices
             .update_in_op(&mut tx, &mut invoice)

@@ -4,7 +4,7 @@ CREATE TABLE invoices (
     id              UUID         PRIMARY KEY,
     payment_hash    BYTEA        NOT NULL UNIQUE,
     wallet_id       UUID         NOT NULL,
-    amount_msat     BIGINT       NOT NULL,
+    amount_msat     BIGINT,
     expiry_at       TIMESTAMPTZ  NOT NULL,
     state           TEXT         NOT NULL,
     created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW()

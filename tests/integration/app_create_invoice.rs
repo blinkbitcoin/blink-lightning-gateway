@@ -8,28 +8,44 @@ use async_trait::async_trait;
 
 use blink_lightning_gateway::app::{App, AppError, InvoiceUpdateDispatcher, NewInvoiceRequest};
 use blink_lightning_gateway::lnd::{
-    AddInvoiceParams, AddInvoiceResponse, FeeProbeParams, FeeProbeResponse, LndApi, LndError,
-    SendPaymentParams, SendPaymentResponse,
+    AddHoldInvoiceParams, AddHoldInvoiceResponse, FeeProbeParams, FeeProbeResponse, InvoiceUpdate,
+    LndApi, LndError, SendPaymentParams, SendPaymentResponse,
 };
 use blink_lightning_gateway::outbox::EventPublisher;
-use blink_lightning_gateway::primitives::{BoltInvoice, MilliSatoshi, PaymentHash, WalletId};
+use blink_lightning_gateway::primitives::{
+    BoltInvoice, MilliSatoshi, PaymentHash, Preimage, WalletId,
+};
 use blink_lightning_gateway::symphony::{LightningSymphonyClient, SymphonyClient};
 use uuid::Uuid;
 
 use crate::common::TestDatabase;
 
 /// Integration tests can't see the lib's `MockLndApi` (gated on lib
-/// `cfg(test)`). The trait has one method, so a hand-written stub is
-/// trivial.
+/// `cfg(test)`). The trait surface is small, so a hand-written stub
+/// is trivial.
 struct CannedOkLnd;
 
 #[async_trait]
 impl LndApi for CannedOkLnd {
-    async fn add_invoice(&self, _params: AddInvoiceParams) -> Result<AddInvoiceResponse, LndError> {
-        Ok(AddInvoiceResponse {
-            payment_hash: PaymentHash::from([0xab; 32]),
+    async fn add_hold_invoice(
+        &self,
+        _params: AddHoldInvoiceParams,
+    ) -> Result<AddHoldInvoiceResponse, LndError> {
+        Ok(AddHoldInvoiceResponse {
             bolt_invoice: BoltInvoice::new("lnbc10n1pj..."),
         })
+    }
+
+    async fn settle_invoice(&self, _preimage: Preimage) -> Result<(), LndError> {
+        Ok(())
+    }
+
+    async fn cancel_invoice(&self, _payment_hash: PaymentHash) -> Result<(), LndError> {
+        Ok(())
+    }
+
+    async fn lookup_invoice(&self, _payment_hash: PaymentHash) -> Result<InvoiceUpdate, LndError> {
+        Err(LndError::Stub)
     }
 
     async fn send_payment(
@@ -48,7 +64,22 @@ struct CannedErrLnd;
 
 #[async_trait]
 impl LndApi for CannedErrLnd {
-    async fn add_invoice(&self, _params: AddInvoiceParams) -> Result<AddInvoiceResponse, LndError> {
+    async fn add_hold_invoice(
+        &self,
+        _params: AddHoldInvoiceParams,
+    ) -> Result<AddHoldInvoiceResponse, LndError> {
+        Err(LndError::Stub)
+    }
+
+    async fn settle_invoice(&self, _preimage: Preimage) -> Result<(), LndError> {
+        Err(LndError::Stub)
+    }
+
+    async fn cancel_invoice(&self, _payment_hash: PaymentHash) -> Result<(), LndError> {
+        Err(LndError::Stub)
+    }
+
+    async fn lookup_invoice(&self, _payment_hash: PaymentHash) -> Result<InvoiceUpdate, LndError> {
         Err(LndError::Stub)
     }
 
@@ -88,8 +119,14 @@ async fn create_invoice_persists_invoice_and_event_rows() {
     );
 
     let invoice = app.create_invoice(ok_request()).await.expect("create");
-    assert_eq!(invoice.payment_hash, PaymentHash::from([0xab; 32]));
-    assert_eq!(invoice.amount_msat, MilliSatoshi::new(1_000_000));
+    // Story 2.4: the hash is gateway-derived from the random preimage, not
+    // canned by LND. Verify the derivation invariant instead — catches a
+    // future regression that swaps `sha256` for a different hash.
+    assert_eq!(
+        invoice.payment_hash,
+        invoice.payment_preimage.payment_hash()
+    );
+    assert_eq!(invoice.amount_msat, Some(MilliSatoshi::new(1_000_000)));
 
     let invoices_count: (i64,) = sqlx::query_as(r#"SELECT COUNT(*) FROM invoices"#)
         .fetch_one(&pool)

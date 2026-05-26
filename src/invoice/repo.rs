@@ -28,7 +28,7 @@ use crate::primitives::{InvoiceId, MilliSatoshi, PaymentHash, Timestamp, WalletI
     columns(
         payment_hash(ty = "PaymentHash", update(persist = false)),
         wallet_id(ty = "WalletId", list_for, update(persist = false)),
-        amount_msat(ty = "MilliSatoshi", find_by = false, update(persist = false)),
+        amount_msat(ty = "Option<MilliSatoshi>", find_by = false, update(persist = false),),
         expiry_at(ty = "Timestamp", find_by = false, update(persist = false)),
         state(
             ty = "String",
@@ -68,5 +68,22 @@ impl Invoices {
             }
         }
         Ok(out)
+    }
+
+    /// Return the `payment_hash` of every `Held` invoice. Used by
+    /// `invoice_reconciliation_sweep` (5-min cadence) to query LND
+    /// for each held invoice's actual state and reconcile divergences
+    /// — covers missed subscription events.
+    pub async fn list_held(&self, limit: i64) -> Result<Vec<PaymentHash>, super::InvoiceError> {
+        let rows = sqlx::query!(
+            r#"SELECT payment_hash as "payment_hash: PaymentHash"
+               FROM invoices
+               WHERE state = 'held'
+               LIMIT $1"#,
+            limit,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|r| r.payment_hash).collect())
     }
 }

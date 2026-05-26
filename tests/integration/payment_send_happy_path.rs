@@ -30,8 +30,8 @@ use blink_lightning_gateway::lightning_payment_gateway::{
     SubscribeEventsRequest,
 };
 use blink_lightning_gateway::lnd::{
-    AddInvoiceParams, AddInvoiceResponse, FeeProbeParams, FeeProbeResponse, LndApi, LndError,
-    PaymentUpdate, SendPaymentParams, SendPaymentResponse, SendPaymentStatus,
+    AddHoldInvoiceParams, AddHoldInvoiceResponse, FeeProbeParams, FeeProbeResponse, InvoiceUpdate,
+    LndApi, LndError, PaymentUpdate, SendPaymentParams, SendPaymentResponse, SendPaymentStatus,
 };
 use blink_lightning_gateway::outbox::EventPublisher;
 use blink_lightning_gateway::payment::{FailureReason, Hop, Payments};
@@ -80,7 +80,22 @@ struct CannedLnd;
 
 #[async_trait]
 impl LndApi for CannedLnd {
-    async fn add_invoice(&self, _params: AddInvoiceParams) -> Result<AddInvoiceResponse, LndError> {
+    async fn add_hold_invoice(
+        &self,
+        _params: AddHoldInvoiceParams,
+    ) -> Result<AddHoldInvoiceResponse, LndError> {
+        Err(LndError::Stub)
+    }
+
+    async fn settle_invoice(&self, _preimage: Preimage) -> Result<(), LndError> {
+        Err(LndError::Stub)
+    }
+
+    async fn cancel_invoice(&self, _payment_hash: PaymentHash) -> Result<(), LndError> {
+        Err(LndError::Stub)
+    }
+
+    async fn lookup_invoice(&self, _payment_hash: PaymentHash) -> Result<InvoiceUpdate, LndError> {
         Err(LndError::Stub)
     }
 

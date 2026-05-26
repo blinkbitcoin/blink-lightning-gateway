@@ -16,10 +16,13 @@ use tonic_health::server::{HealthReporter, HealthService};
 
 use ::tracing::{error, info, warn};
 
+use job::{JobId, JobSvcConfig, Jobs};
+
 use crate::api::grpc::LightningPaymentGatewayService;
 use crate::app::{App, InvoiceUpdateDispatcher};
 use crate::cli::config::{Config, EnvOverride};
-use crate::job::invoice_subscription_recovery_sweep::run_invoice_subscription_recovery_sweep;
+use crate::job::invoice_reconciliation_sweep::InvoiceReconciliationSweepInitializer;
+use crate::job::invoice_subscription_recovery_sweep::InvoiceSubscriptionRecoverySweepInitializer;
 use crate::lightning_payment_gateway::lightning_payment_gateway_server::LightningPaymentGatewayServer;
 use crate::lnd::{subscribe_payments, InvoiceUpdate, LndApi, LndClient, LndConfig};
 use crate::outbox::EventPublisher;
@@ -140,7 +143,7 @@ async fn run_cmd(config: Config) -> anyhow::Result<()> {
 
     let cancel = CancellationToken::new();
 
-    // Story 2.3: invoice-update dispatcher + consumer task. The
+    // invoice-update dispatcher + consumer task. The
     // dispatcher owns the LND handle + the shared mpsc Sender; threaded
     // into `App::new` so `App::create_invoice` spawns a per-hash
     // `subscribe_invoice` listener at invoice-creation time, and the
@@ -157,6 +160,45 @@ async fn run_cmd(config: Config) -> anyhow::Result<()> {
         symphony,
         invoice_dispatcher.clone(),
     );
+
+    let jobs_config = JobSvcConfig::builder()
+        .pool(pool.clone())
+        .exec_migrations(false)
+        .build()
+        .map_err(|e| anyhow::anyhow!("build JobSvcConfig: {e}"))?;
+    let mut jobs = Jobs::init(jobs_config).await?;
+
+    // Initialize scheduled jobs
+    let (recovery_sweep_spawner, reconciliation_sweep_spawner) = if lnd_client.is_connected() {
+        let recovery = jobs.add_initializer(InvoiceSubscriptionRecoverySweepInitializer::new(
+            app.clone(),
+            invoice_dispatcher.clone(),
+        ));
+        let reconciliation =
+            jobs.add_initializer(InvoiceReconciliationSweepInitializer::new(app.clone()));
+        (Some(recovery), Some(reconciliation))
+    } else {
+        warn!(
+            "LND boot-stub mode: skipping invoice_subscription_recovery_sweep \
+             + invoice_reconciliation_sweep registration"
+        );
+        (None, None)
+    };
+
+    jobs.start_poll().await.context("Jobs::start_poll")?;
+
+    if let Some(spawner) = recovery_sweep_spawner {
+        spawner
+            .spawn_unique(JobId::new(), ())
+            .await
+            .context("spawn_unique invoice_subscription_recovery_sweep")?;
+    }
+    if let Some(spawner) = reconciliation_sweep_spawner {
+        spawner
+            .spawn_unique(JobId::new(), ())
+            .await
+            .context("spawn_unique invoice_reconciliation_sweep")?;
+    }
 
     let (send, mut receive) = tokio::sync::mpsc::channel::<anyhow::Result<()>>(1);
     let mut handles = Vec::new();
@@ -260,31 +302,6 @@ async fn run_cmd(config: Config) -> anyhow::Result<()> {
             };
             report_exit(&send, result);
         }));
-    }
-
-    // Recovery sweep: re-spawn a per-hash listener for every open invoice
-    // (SubscribeSingleInvoice replays current state on subscribe, catching
-    // up transitions missed during an outage). Spawned, not awaited, so a
-    // large backlog can't delay startup; `select!` cancels a mid-sweep
-    // query on shutdown. Skipped in boot-stub mode.
-    if lnd_client.is_connected() {
-        let sweep_app = app.clone();
-        let sweep_dispatcher = invoice_dispatcher.clone();
-        let sweep_cancel = cancel.clone();
-        tokio::spawn(async move {
-            tokio::select! {
-                _ = sweep_cancel.cancelled() => {
-                    info!("invoice subscription recovery sweep cancelled before completion");
-                }
-                result = run_invoice_subscription_recovery_sweep(sweep_app, sweep_dispatcher) => {
-                    if let Err(e) = result {
-                        warn!(error = %e, "invoice subscription recovery sweep failed");
-                    }
-                }
-            }
-        });
-    } else {
-        warn!("LND boot-stub mode: skipping invoice subscription recovery sweep");
     }
 
     // LND payment-subscription task. Forwards
@@ -400,6 +417,12 @@ async fn run_cmd(config: Config) -> anyhow::Result<()> {
             abort.abort();
         }
     }
+
+    // Explicit graceful shutdown of the job poller
+    if let Err(e) = jobs.shutdown().await {
+        warn!(error = %e, "Jobs::shutdown returned error");
+    }
+
     reason
 }
 

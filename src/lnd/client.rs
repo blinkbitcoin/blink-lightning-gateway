@@ -40,7 +40,7 @@ use crate::primitives::{BoltInvoice, MilliSatoshi, PaymentHash, Preimage, Pubkey
 use super::{
     config::LndConfig,
     error::LndError,
-    invoice::{AddInvoiceParams, AddInvoiceResponse},
+    invoice::{lnd_invoice_to_update, AddHoldInvoiceParams, AddHoldInvoiceResponse, InvoiceUpdate},
     payment::{
         FeeProbeParams, FeeProbeResponse, SendPaymentParams, SendPaymentResponse, SendPaymentStatus,
     },
@@ -53,7 +53,23 @@ use super::{
 #[async_trait]
 #[cfg_attr(test, mockall::automock)]
 pub trait LndApi: Send + Sync {
-    async fn add_invoice(&self, params: AddInvoiceParams) -> Result<AddInvoiceResponse, LndError>;
+    async fn add_hold_invoice(
+        &self,
+        params: AddHoldInvoiceParams,
+    ) -> Result<AddHoldInvoiceResponse, LndError>;
+
+    /// Release the preimage for a held HODL invoice.
+    /// Idempotency at the gateway is enforced by `Invoice::settle`
+    /// (`already_applied:` guard)
+    async fn settle_invoice(&self, preimage: Preimage) -> Result<(), LndError>;
+
+    /// Cancel a held or open invoice
+    async fn cancel_invoice(&self, payment_hash: PaymentHash) -> Result<(), LndError>;
+
+    /// Query LND for the current state of an invoice by payment hash.
+    /// Used by `App::reconcile_held_invoice` (driven by the 5-min
+    /// `invoice_reconciliation_sweep`) to recover from missed subscription events
+    async fn lookup_invoice(&self, payment_hash: PaymentHash) -> Result<InvoiceUpdate, LndError>;
 
     async fn send_payment(
         &self,
@@ -159,28 +175,64 @@ impl LndClient {
 
 #[async_trait]
 impl LndApi for LndClient {
-    async fn add_invoice(&self, params: AddInvoiceParams) -> Result<AddInvoiceResponse, LndError> {
+    async fn add_hold_invoice(
+        &self,
+        params: AddHoldInvoiceParams,
+    ) -> Result<AddHoldInvoiceResponse, LndError> {
         let mut inner = self.require_inner()?;
-        let value_msat: i64 =
-            params.amount_msat.as_u64().try_into().map_err(|_| {
+        let value_msat: i64 = match params.amount_msat {
+            Some(a) => a.as_u64().try_into().map_err(|_| {
                 LndError::InvalidResponse("amount_msat exceeds i64::MAX".to_owned())
-            })?;
-        let invoice = lnrpc::Invoice {
-            memo: params.memo.unwrap_or_default(),
+            })?,
+            None => 0,
+        };
+        let req = invoicesrpc::AddHoldInvoiceRequest {
+            hash: params.payment_hash.as_bytes().to_vec(),
             value_msat,
             expiry: i64::from(params.expiry_seconds),
+            memo: params.memo.unwrap_or_default(),
             ..Default::default()
         };
-        let resp = inner.lightning().add_invoice(invoice).await?.into_inner();
-        let len = resp.r_hash.len();
-        let r_hash: [u8; 32] = resp
-            .r_hash
-            .try_into()
-            .map_err(|_| LndError::InvalidResponse(format!("r_hash length {len}, expected 32")))?;
-        Ok(AddInvoiceResponse {
-            payment_hash: PaymentHash::from(r_hash),
+        let resp = inner.invoices().add_hold_invoice(req).await?.into_inner();
+        Ok(AddHoldInvoiceResponse {
             bolt_invoice: BoltInvoice::new(resp.payment_request),
         })
+    }
+
+    async fn settle_invoice(&self, preimage: Preimage) -> Result<(), LndError> {
+        let mut inner = self.require_inner()?;
+        let req = invoicesrpc::SettleInvoiceMsg {
+            preimage: preimage.into_bytes().to_vec(),
+        };
+        inner.invoices().settle_invoice(req).await?;
+        Ok(())
+    }
+
+    async fn cancel_invoice(&self, payment_hash: PaymentHash) -> Result<(), LndError> {
+        let mut inner = self.require_inner()?;
+        let req = invoicesrpc::CancelInvoiceMsg {
+            payment_hash: payment_hash.as_bytes().to_vec(),
+        };
+        inner.invoices().cancel_invoice(req).await?;
+        Ok(())
+    }
+
+    async fn lookup_invoice(&self, payment_hash: PaymentHash) -> Result<InvoiceUpdate, LndError> {
+        let mut inner = self.require_inner()?;
+        let req = lnrpc::PaymentHash {
+            r_hash: payment_hash.as_bytes().to_vec(),
+            ..Default::default()
+        };
+        let invoice = inner.lightning().lookup_invoice(req).await?.into_inner();
+        let update = lnd_invoice_to_update(invoice)?;
+        if update.payment_hash != payment_hash {
+            return Err(LndError::InvalidResponse(format!(
+                "lookup_invoice: requested {}, LND returned {}",
+                payment_hash.to_hex(),
+                update.payment_hash.to_hex()
+            )));
+        }
+        Ok(update)
     }
 
     async fn send_payment(

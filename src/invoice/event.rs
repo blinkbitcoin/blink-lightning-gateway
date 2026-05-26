@@ -1,10 +1,11 @@
 //! `InvoiceEvent` — event-sourced changes on the Invoice aggregate.
 //!
-//! Slice 1a carries `Created`. Story 2.3 adds `HtlcHeld`, `Settled`,
-//! and `Canceled` for the inbound subscription lifecycle observed via
-//! LND's per-hash `SubscribeSingleInvoice`. Story 2.4 will DRIVE
-//! `Held → Settled` via the explicit-cancel / settle-hold-invoice
-//! command paths; Story 2.3 only observes regular invoices.
+//! Story 2.4 makes every gateway invoice a HODL invoice: `Created`
+//! carries the gateway-owned `payment_preimage` and an optional
+//! `amount_msat` (amountless invoices source the settled amount from
+//! received HTLCs). The DRIVE side (`settle_hold_invoice`,
+//! `reconcile_held_invoice`) lands in the app module; this file is
+//! the aggregate event vocabulary only.
 //!
 //! Note: there is no per-event `id` field — `EntityEvents::id()` already
 //! carries the entity id, and the es-entity event log table joins on
@@ -18,25 +19,17 @@ use crate::primitives::{
     BoltInvoice, InvoiceId, MilliSatoshi, PaymentHash, Preimage, Timestamp, WalletId,
 };
 
-/// Reason an inbound invoice was canceled. Story 2.3's subscription
-/// path only ever fires `Expired` (LND auto-cancels unheld invoices on
-/// timeout). `Manual` is reserved for Story 2.4's explicit-cancel
-/// command path; `Other(String)` is the escape hatch for variants LND
-/// may emit that we haven't enumerated yet.
+/// Reason an inbound invoice was canceled
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "detail", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CancelReason {
     Expired,
-    Manual,
-    Other(String),
 }
 
 impl CancelReason {
     pub fn as_str(&self) -> &str {
         match self {
             Self::Expired => "Expired",
-            Self::Manual => "Manual",
-            Self::Other(_) => "Other",
         }
     }
 }
@@ -53,29 +46,21 @@ impl CancelReason {
 pub enum InvoiceEvent {
     Created {
         payment_hash: PaymentHash,
+        payment_preimage: Preimage,
         wallet_id: WalletId,
-        amount_msat: MilliSatoshi,
+        amount_msat: Option<MilliSatoshi>,
         expiry_at: Timestamp,
         bolt_invoice: BoltInvoice,
         created_at: Timestamp,
     },
-    /// LND `SubscribeSingleInvoice` reported `Accepted` — an HTLC
-    /// (or set of HTLCs for MPP) is parked on a HOLD invoice. For
-    /// Story 2.3's regular-invoice path the field equals the original
-    /// invoice amount; HOLD's MPP case in Story 2.4 may differ.
     HtlcHeld {
         held_at: Timestamp,
         htlc_amount_msat: MilliSatoshi,
     },
-    /// LND reported `Settled` (`is_confirmed`) — the preimage has been
-    /// released. Drives the standardized `IncomingPaymentConfirmed`
-    /// outbox row.
     Settled {
         settled_at: Timestamp,
         payment_preimage: Preimage,
     },
-    /// LND reported `Canceled` (`is_canceled`). Story 2.3 only ever
-    /// fires `CancelReason::Expired`; Story 2.4 wires `Manual`.
     Canceled {
         canceled_at: Timestamp,
         reason: CancelReason,

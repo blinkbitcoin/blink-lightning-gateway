@@ -4,6 +4,7 @@
 //! in `src/lnd/invoice.rs` unit tests.
 
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -14,7 +15,7 @@ use tonic::transport::{Channel, Server};
 
 use blink_lightning_gateway::api::grpc::LightningPaymentGatewayService;
 use blink_lightning_gateway::app::{App, InvoiceUpdateDispatcher, NewInvoiceRequest};
-use blink_lightning_gateway::invoice::entity::{InvoiceState, NewInvoice};
+use blink_lightning_gateway::invoice::entity::NewInvoice;
 use blink_lightning_gateway::invoice::{InvoiceError, Invoices};
 use blink_lightning_gateway::job::invoice_subscription_recovery_sweep::run_invoice_subscription_recovery_sweep;
 use blink_lightning_gateway::lightning_payment_gateway::{
@@ -23,8 +24,8 @@ use blink_lightning_gateway::lightning_payment_gateway::{
     SubscribeEventsRequest,
 };
 use blink_lightning_gateway::lnd::{
-    AddInvoiceParams, AddInvoiceResponse, FeeProbeParams, FeeProbeResponse, InvoiceUpdate, LndApi,
-    LndError, LndInvoiceState, SendPaymentParams, SendPaymentResponse,
+    AddHoldInvoiceParams, AddHoldInvoiceResponse, FeeProbeParams, FeeProbeResponse, InvoiceUpdate,
+    LndApi, LndError, LndInvoiceState, SendPaymentParams, SendPaymentResponse,
 };
 use blink_lightning_gateway::outbox::EventPublisher;
 use blink_lightning_gateway::primitives::{
@@ -35,43 +36,65 @@ use uuid::Uuid;
 
 use crate::common::TestDatabase;
 
-const PH_A: [u8; 32] = [0x0a; 32];
-const PH_B: [u8; 32] = [0x0b; 32];
-const PH_C: [u8; 32] = [0x0c; 32];
-const PH_D: [u8; 32] = [0x0d; 32];
-
-/// LND stub. `add_invoice` pops the next canned hash so each
-/// `create_invoice` call gets a distinct one.
+/// LND stub. `add_hold_invoice` echoes back the gateway-supplied hash —
+/// Story 2.4 made the hash an INPUT — and records the calls so tests
+/// can assert the gateway issued the right RPC. `settle_invoice` /
+/// `cancel_invoice` record their arguments and succeed.
 struct CannedLnd {
-    canned_hashes: AsyncMutex<Vec<[u8; 32]>>,
+    add_calls: AsyncMutex<Vec<PaymentHash>>,
+    settle_calls: StdMutex<Vec<Preimage>>,
+    cancel_calls: StdMutex<Vec<PaymentHash>>,
 }
 
 impl CannedLnd {
-    fn new(hashes: Vec<[u8; 32]>) -> Self {
+    fn new() -> Self {
         Self {
-            canned_hashes: AsyncMutex::new(hashes),
+            add_calls: AsyncMutex::new(Vec::new()),
+            settle_calls: StdMutex::new(Vec::new()),
+            cancel_calls: StdMutex::new(Vec::new()),
         }
     }
 }
 
 #[async_trait]
 impl LndApi for CannedLnd {
-    async fn add_invoice(&self, _params: AddInvoiceParams) -> Result<AddInvoiceResponse, LndError> {
-        let mut guard = self.canned_hashes.lock().await;
-        let bytes = guard
-            .pop()
-            .expect("CannedLnd: ran out of canned payment_hashes");
-        Ok(AddInvoiceResponse {
-            payment_hash: PaymentHash::from(bytes),
+    async fn add_hold_invoice(
+        &self,
+        params: AddHoldInvoiceParams,
+    ) -> Result<AddHoldInvoiceResponse, LndError> {
+        self.add_calls.lock().await.push(params.payment_hash);
+        Ok(AddHoldInvoiceResponse {
             bolt_invoice: BoltInvoice::new("lnbc10n1pj..."),
         })
     }
+
+    async fn settle_invoice(&self, preimage: Preimage) -> Result<(), LndError> {
+        self.settle_calls
+            .lock()
+            .expect("settle_calls lock")
+            .push(preimage);
+        Ok(())
+    }
+
+    async fn cancel_invoice(&self, payment_hash: PaymentHash) -> Result<(), LndError> {
+        self.cancel_calls
+            .lock()
+            .expect("cancel_calls lock")
+            .push(payment_hash);
+        Ok(())
+    }
+
+    async fn lookup_invoice(&self, _payment_hash: PaymentHash) -> Result<InvoiceUpdate, LndError> {
+        Err(LndError::Stub)
+    }
+
     async fn send_payment(
         &self,
         _params: SendPaymentParams,
     ) -> Result<SendPaymentResponse, LndError> {
         Err(LndError::Stub)
     }
+
     async fn fee_probe(&self, _params: FeeProbeParams) -> Result<FeeProbeResponse, LndError> {
         Err(LndError::Stub)
     }
@@ -146,52 +169,47 @@ fn invoice_request(wallet: WalletId) -> NewInvoiceRequest {
     }
 }
 
-/// Walks all four `LndInvoiceState` arms plus the idempotent-replay
-/// and contradictory-transition cases, then asserts the produced
-/// outbox rows stream through gRPC into the Symphony stub.
+/// Walk the LND invoice state machine through `handle_invoice_update` and
+/// assert: entity transitions land, outbox rows fire, the gRPC subscriber
+/// pipeline drains them. Story 2.4 changes the Accepted arm into an
+/// auto-settle, so an Accepted observation now produces BOTH a Held and
+/// a Settled outbox row.
 #[tokio::test]
 async fn incoming_invoice_subscription_drives_full_lifecycle() {
     let db = TestDatabase::new().await.expect("test db");
     let pool = db.pool.clone();
 
-    // Canned hashes pop LIFO — listed reverse of consumption order.
-    let canned = CannedLnd::new(vec![PH_D, PH_C, PH_B, PH_A]);
+    let lnd = Arc::new(CannedLnd::new());
     let outbox = EventPublisher::new(&pool);
     let symphony: Arc<dyn SymphonyClient> = Arc::new(LightningSymphonyClient::new(""));
     let app = App::new(
         pool.clone(),
-        Arc::new(canned),
+        lnd.clone(),
         outbox,
         symphony,
         InvoiceUpdateDispatcher::for_test(),
     );
 
-    // Step 1 — create invoices.
+    // Step 1 — create four invoices. Hashes are gateway-derived from
+    // randomly generated preimages; capture them off the returned
+    // `Invoice` so the synthetic wire events can reference them.
     let wallet = WalletId::from(Uuid::now_v7());
     let inv_a = app
         .create_invoice(invoice_request(wallet))
         .await
         .expect("create A");
-    assert_eq!(inv_a.payment_hash, PaymentHash::from(PH_A));
-    assert_eq!(inv_a.state, InvoiceState::Open);
-
     let inv_b = app
         .create_invoice(invoice_request(wallet))
         .await
         .expect("create B");
-    assert_eq!(inv_b.payment_hash, PaymentHash::from(PH_B));
-
     let inv_c = app
         .create_invoice(invoice_request(wallet))
         .await
         .expect("create C");
-    assert_eq!(inv_c.payment_hash, PaymentHash::from(PH_C));
-
     let inv_d = app
         .create_invoice(invoice_request(wallet))
         .await
         .expect("create D");
-    assert_eq!(inv_d.payment_hash, PaymentHash::from(PH_D));
 
     // Subscribe before any outbox row fires.
     let cancel_token = CancellationToken::new();
@@ -226,17 +244,17 @@ async fn incoming_invoice_subscription_drives_full_lifecycle() {
     // Brief delay so subscription_loop registers LISTEN.
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // Step 2 — Settled for A.
-    let preimage_a = Preimage::from([0xee; 32]);
+    // Step 2 — Settled directly (Open → Settled) for A. Single Settled
+    // outbox row.
     app.handle_invoice_update(InvoiceUpdate {
-        payment_hash: PaymentHash::from(PH_A),
+        payment_hash: inv_a.payment_hash,
         state: LndInvoiceState::Settled,
         htlc_amount_msat: MilliSatoshi::new(1_000_000),
-        payment_preimage: Some(preimage_a),
+        payment_preimage: Some(inv_a.payment_preimage),
     })
     .await
     .expect("settle A");
-    assert_state(&pool, &PaymentHash::from(PH_A), "settled").await;
+    assert_state(&pool, &inv_a.payment_hash, "settled").await;
     assert_outbox(
         &pool,
         "lightning_invoice_settled",
@@ -245,28 +263,37 @@ async fn incoming_invoice_subscription_drives_full_lifecycle() {
     )
     .await;
 
-    // Step 3 — Accepted for B (HTLC arrived).
+    // Step 3 — Accepted for B → auto-settles per the new Story 2.4 flow.
+    // Two outbox rows (Held + Settled), state = Settled.
     app.handle_invoice_update(InvoiceUpdate {
-        payment_hash: PaymentHash::from(PH_B),
+        payment_hash: inv_b.payment_hash,
         state: LndInvoiceState::Accepted,
         htlc_amount_msat: MilliSatoshi::new(1_000_000),
         payment_preimage: None,
     })
     .await
-    .expect("hold B");
-    assert_state(&pool, &PaymentHash::from(PH_B), "held").await;
+    .expect("hold + auto-settle B");
+    assert_state(&pool, &inv_b.payment_hash, "settled").await;
     assert_outbox(&pool, "lightning_htlc_held", "INCOMING_PAYMENT_PENDING", 1).await;
+    assert_outbox(
+        &pool,
+        "lightning_invoice_settled",
+        "INCOMING_PAYMENT_CONFIRMED",
+        2,
+    )
+    .await;
 
-    // Step 4 — Canceled for C.
+    // Step 4 — Canceled (Open → Canceled) for C. Single Canceled outbox
+    // row at amount=0 (never-held discriminator from AC12).
     app.handle_invoice_update(InvoiceUpdate {
-        payment_hash: PaymentHash::from(PH_C),
+        payment_hash: inv_c.payment_hash,
         state: LndInvoiceState::Canceled,
         htlc_amount_msat: MilliSatoshi::ZERO,
         payment_preimage: None,
     })
     .await
     .expect("cancel C");
-    assert_state(&pool, &PaymentHash::from(PH_C), "canceled").await;
+    assert_state(&pool, &inv_c.payment_hash, "canceled").await;
     assert_outbox(
         &pool,
         "lightning_invoice_canceled",
@@ -277,19 +304,19 @@ async fn incoming_invoice_subscription_drives_full_lifecycle() {
 
     // Step 5 — Duplicate Settled → idempotent; no new outbox row.
     app.handle_invoice_update(InvoiceUpdate {
-        payment_hash: PaymentHash::from(PH_A),
+        payment_hash: inv_a.payment_hash,
         state: LndInvoiceState::Settled,
         htlc_amount_msat: MilliSatoshi::new(1_000_000),
-        payment_preimage: Some(preimage_a),
+        payment_preimage: Some(inv_a.payment_preimage),
     })
     .await
     .expect("duplicate settle is Ok(())");
-    assert_outbox_total(&pool, 3).await;
+    assert_outbox_total(&pool, 4).await;
 
     // Step 6 — Canceled after Settled → InvalidStateTransition.
     let err = app
         .handle_invoice_update(InvoiceUpdate {
-            payment_hash: PaymentHash::from(PH_A),
+            payment_hash: inv_a.payment_hash,
             state: LndInvoiceState::Canceled,
             htlc_amount_msat: MilliSatoshi::ZERO,
             payment_preimage: None,
@@ -303,51 +330,57 @@ async fn incoming_invoice_subscription_drives_full_lifecycle() {
         }) => {}
         other => panic!("expected InvalidStateTransition(cancel), got {other:?}"),
     }
-    assert_outbox_total(&pool, 3).await;
+    assert_outbox_total(&pool, 4).await;
 
-    // Step 7 — Open → Held → Settled (HOLD lifecycle).
-    let preimage_d = Preimage::from([0xfa; 32]);
+    // Step 7 — Accepted for D auto-settles (2 rows), then a wire Settled
+    // is idempotent (0 rows). The Accepted arm's auto-settle goes via the
+    // `LndApi::settle_invoice` mock — the test stub records the call.
     app.handle_invoice_update(InvoiceUpdate {
-        payment_hash: PaymentHash::from(PH_D),
+        payment_hash: inv_d.payment_hash,
         state: LndInvoiceState::Accepted,
         htlc_amount_msat: MilliSatoshi::new(1_000_000),
         payment_preimage: None,
     })
     .await
-    .expect("hold D");
+    .expect("hold + auto-settle D");
     app.handle_invoice_update(InvoiceUpdate {
-        payment_hash: PaymentHash::from(PH_D),
+        payment_hash: inv_d.payment_hash,
         state: LndInvoiceState::Settled,
         htlc_amount_msat: MilliSatoshi::new(1_000_000),
-        payment_preimage: Some(preimage_d),
+        payment_preimage: Some(inv_d.payment_preimage),
     })
     .await
-    .expect("settle D");
-    assert_state(&pool, &PaymentHash::from(PH_D), "settled").await;
-    assert_outbox_total(&pool, 5).await;
+    .expect("idempotent settle D");
+    assert_state(&pool, &inv_d.payment_hash, "settled").await;
+    assert_outbox_total(&pool, 6).await;
     assert_outbox(&pool, "lightning_htlc_held", "INCOMING_PAYMENT_PENDING", 2).await;
     assert_outbox(
         &pool,
         "lightning_invoice_settled",
         "INCOMING_PAYMENT_CONFIRMED",
-        2,
+        3,
     )
     .await;
 
-    // Step 8 — consumer pipeline: 5 outbox rows → 5 CalaMock entries.
+    // The auto-settle path called LND `SettleInvoice` once for each of B
+    // and D — verifies the new wiring actually runs.
+    let settle_count = lnd.settle_calls.lock().expect("settle_calls lock").len();
+    assert_eq!(settle_count, 2, "LND SettleInvoice should fire for B + D");
+
+    // Step 8 — consumer pipeline: 6 outbox rows → 6 CalaMock entries.
     let cala = CalaMock::default();
-    let stub_handle = tokio::spawn(run_symphony_stub(stream, cala.clone(), 5));
+    let stub_handle = tokio::spawn(run_symphony_stub(stream, cala.clone(), 6));
     tokio::time::timeout(Duration::from_secs(15), stub_handle)
         .await
         .expect("stub completes within 15s")
         .expect("stub task did not panic");
 
     let entries = cala.snapshot().await;
-    assert_eq!(entries.len(), 5, "expected 5 Cala mock entries");
+    assert_eq!(entries.len(), 6, "expected 6 Cala mock entries");
 
     let count =
         |name: &str| -> usize { entries.iter().filter(|e| e.template_name == name).count() };
-    assert_eq!(count("LIGHTNING_INVOICE_SETTLED"), 2);
+    assert_eq!(count("LIGHTNING_INVOICE_SETTLED"), 3);
     assert_eq!(count("LIGHTNING_INVOICE_PENDING"), 2);
     assert_eq!(count("LIGHTNING_INVOICE_CANCELED"), 1);
 
@@ -365,19 +398,21 @@ async fn recovery_sweep_spawns_listener_for_open_and_held_only() {
     let pool = db.pool.clone();
 
     let invoices_repo = Invoices::new(&pool);
-    let open_hash = PaymentHash::from([0x11; 32]);
-    let held_hash = PaymentHash::from([0x22; 32]);
-    let settled_hash = PaymentHash::from([0x33; 32]);
+    let pre_open = Preimage::from([0x11; 32]);
+    let pre_held = Preimage::from([0x22; 32]);
+    let pre_settled = Preimage::from([0x33; 32]);
+    let open_hash = pre_open.payment_hash();
+    let held_hash = pre_held.payment_hash();
 
     // Open — never paid.
     invoices_repo
-        .create(seed_invoice(open_hash, "lnbc-open"))
+        .create(seed_invoice(pre_open, "lnbc-open"))
         .await
         .unwrap();
 
     // Held — an HTLC is parked.
     let mut held = invoices_repo
-        .create(seed_invoice(held_hash, "lnbc-held"))
+        .create(seed_invoice(pre_held, "lnbc-held"))
         .await
         .unwrap();
     let _ = held
@@ -387,18 +422,16 @@ async fn recovery_sweep_spawns_listener_for_open_and_held_only() {
 
     // Settled — terminal; the sweep must skip it.
     let mut settled = invoices_repo
-        .create(seed_invoice(settled_hash, "lnbc-settled"))
+        .create(seed_invoice(pre_settled, "lnbc-settled"))
         .await
         .unwrap();
-    let _ = settled
-        .settle(Preimage::from([0xee; 32]), Timestamp::now())
-        .unwrap();
+    let _ = settled.settle(pre_settled, Timestamp::now()).unwrap();
     invoices_repo.update(&mut settled).await.unwrap();
 
     let symphony: Arc<dyn SymphonyClient> = Arc::new(LightningSymphonyClient::new(""));
     let app = App::new(
         pool.clone(),
-        Arc::new(CannedLnd::new(Vec::new())),
+        Arc::new(CannedLnd::new()),
         EventPublisher::new(&pool),
         symphony,
         InvoiceUpdateDispatcher::for_test(),
@@ -425,12 +458,14 @@ async fn recovery_sweep_spawns_listener_for_open_and_held_only() {
     );
 }
 
-/// `NewInvoice` with a throwaway wallet/amount for seeding sweep rows.
-fn seed_invoice(payment_hash: PaymentHash, bolt: &str) -> NewInvoice {
+/// `NewInvoice` seeded for sweep coverage. The preimage carries the hash
+/// so the test can assert on its derivation if needed.
+fn seed_invoice(preimage: Preimage, bolt: &str) -> NewInvoice {
     NewInvoice::try_new(
-        payment_hash,
+        preimage.payment_hash(),
+        preimage,
         WalletId::from(Uuid::now_v7()),
-        MilliSatoshi::new(1_000_000),
+        Some(MilliSatoshi::new(1_000_000)),
         3600,
         BoltInvoice::new(bolt),
         Timestamp::now(),

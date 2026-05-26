@@ -5,10 +5,14 @@
 //! settle invoices; this type lands here so Story 2.2 (HOLD invoice settle)
 //! has the type ready.
 
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use sqlx::{Decode, Encode, Postgres, Type};
 use std::fmt;
 use std::str::FromStr;
+
+use super::PaymentHash;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Preimage([u8; 32]);
@@ -16,6 +20,21 @@ pub struct Preimage([u8; 32]);
 impl Preimage {
     pub const fn new(bytes: [u8; 32]) -> Self {
         Self(bytes)
+    }
+
+    /// Generate a cryptographically-secure-random 32-byte preimage
+    pub fn generate() -> Self {
+        let mut bytes = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut bytes);
+        Self(bytes)
+    }
+
+    /// Derive `payment_hash = SHA256(preimage)`
+    pub fn payment_hash(&self) -> PaymentHash {
+        let mut hasher = Sha256::new();
+        hasher.update(self.0);
+        let digest: [u8; 32] = hasher.finalize().into();
+        PaymentHash::from(digest)
     }
 
     pub fn as_bytes(&self) -> &[u8; 32] {
@@ -136,5 +155,24 @@ mod tests {
         let s = "ab".repeat(31);
         let err = Preimage::from_str(&s).unwrap_err();
         assert!(matches!(err, PreimageError::InvalidLength(_)));
+    }
+
+    #[test]
+    fn payment_hash_is_sha256_of_preimage() {
+        // Catches accidental algorithm or endianness changes in
+        // `Preimage::payment_hash` — the gateway-owned hash must match
+        // what LND will compute when verifying the HODL invoice.
+        let p = Preimage::from([0u8; 32]);
+        // SHA-256 of 32 zero bytes:
+        let expected_hex = "66687aadf862bd776c8fc18b8e9f8e20089714856ee233b3902a591d0d5f2925";
+        assert_eq!(p.payment_hash().to_hex(), expected_hex);
+    }
+
+    #[test]
+    fn generate_produces_distinct_preimages() {
+        // Smoke-check the entropy source is at least not constant.
+        let a = Preimage::generate();
+        let b = Preimage::generate();
+        assert_ne!(a, b);
     }
 }

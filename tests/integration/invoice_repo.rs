@@ -1,7 +1,7 @@
 //! `Invoices` repo coverage: round-trips against Postgres. The
 //! `try_new` validation path is covered by the pure entity tests in
-//! `src/invoice/entity.rs` (`try_new_rejects_zero_amount`), so it
-//! doesn't need its own DB-bound test here.
+//! `src/invoice/entity.rs`, so it doesn't need its own DB-bound test
+//! here.
 
 use blink_lightning_gateway::invoice::entity::{InvoiceState, NewInvoice};
 use blink_lightning_gateway::invoice::Invoices;
@@ -13,10 +13,12 @@ use uuid::Uuid;
 use crate::common::TestDatabase;
 
 fn ok_new_invoice() -> NewInvoice {
+    let preimage = Preimage::from([0xee; 32]);
     NewInvoice::try_new(
-        PaymentHash::from([0xaa; 32]),
+        preimage.payment_hash(),
+        preimage,
         WalletId::from(Uuid::now_v7()),
-        MilliSatoshi::new(1_000_000),
+        Some(MilliSatoshi::new(1_000_000)),
         3600,
         BoltInvoice::new("lnbc1u1pj..."),
         Timestamp::now(),
@@ -32,15 +34,16 @@ async fn create_then_find_by_payment_hash() {
 
     let new = ok_new_invoice();
     let expected_id = new.id;
+    let expected_hash = new.payment_hash;
     let created = invoices.create(new).await.expect("create");
     assert_eq!(created.id, expected_id);
 
     let found = invoices
-        .find_by_payment_hash(&PaymentHash::from([0xaa; 32]))
+        .find_by_payment_hash(&expected_hash)
         .await
         .expect("find");
     assert_eq!(found.id, expected_id);
-    assert_eq!(found.amount_msat, MilliSatoshi::new(1_000_000));
+    assert_eq!(found.amount_msat, Some(MilliSatoshi::new(1_000_000)));
 }
 
 #[tokio::test]
@@ -89,12 +92,14 @@ async fn list_open_invoices_returns_open_and_held_only() {
     let pool = db.pool.clone();
     let invoices = Invoices::new(&pool);
 
+    let pre_open = Preimage::from([0x01; 32]);
     let open_invoice = invoices
         .create(
             NewInvoice::try_new(
-                PaymentHash::from([0x01; 32]),
+                pre_open.payment_hash(),
+                pre_open,
                 WalletId::from(Uuid::now_v7()),
-                MilliSatoshi::new(1_000_000),
+                Some(MilliSatoshi::new(1_000_000)),
                 3600,
                 BoltInvoice::new("lnbc1u1pj..."),
                 Timestamp::now(),
@@ -104,12 +109,14 @@ async fn list_open_invoices_returns_open_and_held_only() {
         .await
         .expect("create open");
 
+    let pre_held = Preimage::from([0x02; 32]);
     let mut held = invoices
         .create(
             NewInvoice::try_new(
-                PaymentHash::from([0x02; 32]),
+                pre_held.payment_hash(),
+                pre_held,
                 WalletId::from(Uuid::now_v7()),
-                MilliSatoshi::new(2_000_000),
+                Some(MilliSatoshi::new(2_000_000)),
                 3600,
                 BoltInvoice::new("lnbc2u1pj..."),
                 Timestamp::now(),
@@ -123,12 +130,14 @@ async fn list_open_invoices_returns_open_and_held_only() {
         .unwrap();
     invoices.update(&mut held).await.expect("update to held");
 
+    let pre_settled = Preimage::from([0x03; 32]);
     let mut settled = invoices
         .create(
             NewInvoice::try_new(
-                PaymentHash::from([0x03; 32]),
+                pre_settled.payment_hash(),
+                pre_settled,
                 WalletId::from(Uuid::now_v7()),
-                MilliSatoshi::new(3_000_000),
+                Some(MilliSatoshi::new(3_000_000)),
                 3600,
                 BoltInvoice::new("lnbc3u1pj..."),
                 Timestamp::now(),
@@ -137,9 +146,7 @@ async fn list_open_invoices_returns_open_and_held_only() {
         )
         .await
         .expect("create settled");
-    let _ = settled
-        .settle(Preimage::from([0xee; 32]), Timestamp::now())
-        .unwrap();
+    let _ = settled.settle(pre_settled, Timestamp::now()).unwrap();
     invoices
         .update(&mut settled)
         .await
@@ -161,18 +168,22 @@ async fn list_open_invoices_returns_open_and_held_only() {
 
 #[tokio::test]
 async fn invoice_settled_event_hydrates_payment_preimage() {
-    // Persist a Created event, transition to Settled, reload — assert the
-    // `payment_preimage` projection field is `Some(...)`. Guards the new
-    // `Invoice::settle` + `TryFromEvents` fold path.
+    // Persist a Created event (preimage on Created per AC3), transition to
+    // Settled, reload — assert the `payment_preimage` field round-trips
+    // through the event log. Guards `try_from_events`'s preimage-from-
+    // Created fold and the `settle` debug_assert that the wire preimage
+    // matches the Created one.
     let db = TestDatabase::new().await.expect("test db");
     let pool = db.pool.clone();
     let invoices = Invoices::new(&pool);
 
-    let payment_hash = PaymentHash::from([0x42; 32]);
+    let preimage = Preimage::from([0xab; 32]);
+    let payment_hash = preimage.payment_hash();
     let new = NewInvoice::try_new(
         payment_hash,
+        preimage,
         WalletId::from(Uuid::now_v7()),
-        MilliSatoshi::new(1_000_000),
+        Some(MilliSatoshi::new(1_000_000)),
         3600,
         BoltInvoice::new("lnbc1u1pj..."),
         Timestamp::now(),
@@ -180,7 +191,6 @@ async fn invoice_settled_event_hydrates_payment_preimage() {
     .unwrap();
     let mut invoice = invoices.create(new).await.expect("create");
 
-    let preimage = Preimage::from([0xab; 32]);
     let _ = invoice.settle(preimage, Timestamp::now()).unwrap();
     invoices.update(&mut invoice).await.expect("update");
 
@@ -189,5 +199,5 @@ async fn invoice_settled_event_hydrates_payment_preimage() {
         .await
         .expect("find");
     assert_eq!(reloaded.state, InvoiceState::Settled);
-    assert_eq!(reloaded.payment_preimage, Some(preimage));
+    assert_eq!(reloaded.payment_preimage, preimage);
 }

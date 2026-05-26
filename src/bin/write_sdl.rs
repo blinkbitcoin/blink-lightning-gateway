@@ -16,17 +16,33 @@ use async_trait::async_trait;
 use blink_lightning_gateway::api::graphql::build_schema;
 use blink_lightning_gateway::app::{App, InvoiceUpdateDispatcher};
 use blink_lightning_gateway::lnd::{
-    AddInvoiceParams, AddInvoiceResponse, FeeProbeParams, FeeProbeResponse, LndApi, LndError,
-    SendPaymentParams, SendPaymentResponse,
+    AddHoldInvoiceParams, AddHoldInvoiceResponse, FeeProbeParams, FeeProbeResponse, InvoiceUpdate,
+    LndApi, LndError, SendPaymentParams, SendPaymentResponse,
 };
 use blink_lightning_gateway::outbox::EventPublisher;
+use blink_lightning_gateway::primitives::{PaymentHash, Preimage};
 use blink_lightning_gateway::symphony::{LightningSymphonyClient, SymphonyClient};
 
 struct StubLnd;
 
 #[async_trait]
 impl LndApi for StubLnd {
-    async fn add_invoice(&self, _params: AddInvoiceParams) -> Result<AddInvoiceResponse, LndError> {
+    async fn add_hold_invoice(
+        &self,
+        _params: AddHoldInvoiceParams,
+    ) -> Result<AddHoldInvoiceResponse, LndError> {
+        Err(LndError::Stub)
+    }
+
+    async fn settle_invoice(&self, _preimage: Preimage) -> Result<(), LndError> {
+        Err(LndError::Stub)
+    }
+
+    async fn cancel_invoice(&self, _payment_hash: PaymentHash) -> Result<(), LndError> {
+        Err(LndError::Stub)
+    }
+
+    async fn lookup_invoice(&self, _payment_hash: PaymentHash) -> Result<InvoiceUpdate, LndError> {
         Err(LndError::Stub)
     }
 

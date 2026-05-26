@@ -16,7 +16,9 @@ pub mod fee_probe;
 pub mod handle_invoice_update;
 pub mod handle_payment_update;
 pub mod helpers;
+pub mod reconcile_held_invoice;
 pub mod send_payment;
+pub mod settle_hold_invoice;
 
 pub use error::AppError;
 pub use handle_invoice_update::InvoiceUpdateDispatcher;

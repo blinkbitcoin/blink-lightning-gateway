@@ -68,32 +68,39 @@ impl fmt::Display for InvoiceState {
 /// Validated input for creating an invoice — built via
 /// `NewInvoice::try_new`. The `id` is minted in `try_new` so the repo
 /// can use it for both the projection-row insert and the event-log
-/// grouping.
+/// grouping. `payment_preimage` is gateway-owned (HODL): generated
+/// before calling LND's `AddHoldInvoice`, threaded into `Created`,
+/// retained on the hydrated `Invoice` so `settle_hold_invoice` can
+/// release it.
 #[derive(Clone, Debug)]
 pub struct NewInvoice {
     pub id: InvoiceId,
     pub payment_hash: PaymentHash,
+    pub payment_preimage: Preimage,
     pub wallet_id: WalletId,
-    pub amount_msat: MilliSatoshi,
+    pub amount_msat: Option<MilliSatoshi>,
     pub expiry_at: Timestamp,
     pub bolt_invoice: BoltInvoice,
     pub created_at: Timestamp,
 }
 
 impl NewInvoice {
-    /// Validating constructor. Rejects zero amount; coerces
+    /// Validating constructor. Accepts `None` for amountless invoices
+    /// (settled amount sourced from received HTLCs), `Some(positive)`
+    /// for fixed-amount; rejects `Some(MilliSatoshi::ZERO)`. Coerces
     /// out-of-range `expiry_seconds` (outside 60s..=24h) to the 4-hour
     /// default. `memo` isn't stored — it's already encoded in
     /// `bolt_invoice` (BOLT11's `d` field).
     pub fn try_new(
         payment_hash: PaymentHash,
+        payment_preimage: Preimage,
         wallet_id: WalletId,
-        amount_msat: MilliSatoshi,
+        amount_msat: Option<MilliSatoshi>,
         expiry_seconds: u32,
         bolt_invoice: BoltInvoice,
         now: Timestamp,
     ) -> Result<Self, InvoiceError> {
-        if amount_msat.as_u64() == 0 {
+        if matches!(amount_msat, Some(a) if a.as_u64() == 0) {
             return Err(InvoiceError::InvalidAmount);
         }
         let effective_expiry =
@@ -108,6 +115,7 @@ impl NewInvoice {
         Ok(Self {
             id: InvoiceId::new(),
             payment_hash,
+            payment_preimage,
             wallet_id,
             amount_msat,
             expiry_at,
@@ -128,6 +136,7 @@ impl IntoEvents<InvoiceEvent> for NewInvoice {
             self.id,
             [InvoiceEvent::Created {
                 payment_hash: self.payment_hash,
+                payment_preimage: self.payment_preimage,
                 wallet_id: self.wallet_id,
                 amount_msat: self.amount_msat,
                 expiry_at: self.expiry_at,
@@ -145,15 +154,17 @@ impl IntoEvents<InvoiceEvent> for NewInvoice {
 pub struct Invoice {
     pub id: InvoiceId,
     pub payment_hash: PaymentHash,
+    pub payment_preimage: Preimage,
     pub wallet_id: WalletId,
-    pub amount_msat: MilliSatoshi,
+    pub amount_msat: Option<MilliSatoshi>,
     pub expiry_at: Timestamp,
     pub bolt_invoice: BoltInvoice,
     #[builder(default = "InvoiceState::Open")]
     pub state: InvoiceState,
     pub created_at: Timestamp,
+    /// Parked HTLC sum (from `HtlcHeld`)
     #[builder(default)]
-    pub payment_preimage: Option<Preimage>,
+    pub held_amount_msat: Option<MilliSatoshi>,
     #[builder(default)]
     pub canceled_reason: Option<CancelReason>,
     events: EntityEvents<InvoiceEvent>,
@@ -184,6 +195,7 @@ impl Invoice {
             htlc_amount_msat,
         });
         self.state = InvoiceState::Held;
+        self.held_amount_msat = Some(htlc_amount_msat);
         Ok(Idempotent::Executed(()))
     }
 
@@ -208,7 +220,6 @@ impl Invoice {
             payment_preimage,
         });
         self.state = InvoiceState::Settled;
-        self.payment_preimage = Some(payment_preimage);
         Ok(Idempotent::Executed(()))
     }
 
@@ -236,7 +247,7 @@ impl Invoice {
     }
 }
 
-// `EntityEvents` does not derive `Debug` in es-entity 0.9.5, so we cannot
+// `EntityEvents` does not derive `Debug` in es-entity 0.10.36, so we cannot
 // auto-derive `Debug` on `Invoice`. Hand-impl excludes the events field;
 // callers that need event-level inspection use `Invoice::events()` /
 // `Invoice::events_mut()` from the `EsEntity` impl.
@@ -245,13 +256,14 @@ impl fmt::Debug for Invoice {
         f.debug_struct("Invoice")
             .field("id", &self.id)
             .field("payment_hash", &self.payment_hash)
+            .field("payment_preimage", &self.payment_preimage)
             .field("wallet_id", &self.wallet_id)
             .field("amount_msat", &self.amount_msat)
             .field("expiry_at", &self.expiry_at)
             .field("bolt_invoice", &self.bolt_invoice)
             .field("state", &self.state)
             .field("created_at", &self.created_at)
-            .field("payment_preimage", &self.payment_preimage)
+            .field("held_amount_msat", &self.held_amount_msat)
             .field("canceled_reason", &self.canceled_reason)
             .finish()
     }
@@ -265,6 +277,7 @@ impl TryFromEvents<InvoiceEvent> for Invoice {
             match ev {
                 InvoiceEvent::Created {
                     payment_hash,
+                    payment_preimage,
                     wallet_id,
                     amount_msat,
                     expiry_at,
@@ -273,21 +286,22 @@ impl TryFromEvents<InvoiceEvent> for Invoice {
                 } => {
                     builder = builder
                         .payment_hash(*payment_hash)
+                        .payment_preimage(*payment_preimage)
                         .wallet_id(*wallet_id)
                         .amount_msat(*amount_msat)
                         .expiry_at(*expiry_at)
                         .bolt_invoice(bolt_invoice.clone())
                         .created_at(*created_at);
                 }
-                InvoiceEvent::HtlcHeld { .. } => {
-                    builder = builder.state(InvoiceState::Held);
-                }
-                InvoiceEvent::Settled {
-                    payment_preimage, ..
+                InvoiceEvent::HtlcHeld {
+                    htlc_amount_msat, ..
                 } => {
                     builder = builder
-                        .state(InvoiceState::Settled)
-                        .payment_preimage(Some(*payment_preimage));
+                        .state(InvoiceState::Held)
+                        .held_amount_msat(Some(*htlc_amount_msat));
+                }
+                InvoiceEvent::Settled { .. } => {
+                    builder = builder.state(InvoiceState::Settled);
                 }
                 InvoiceEvent::Canceled { reason, .. } => {
                     builder = builder
@@ -316,11 +330,19 @@ mod tests {
         Timestamp::from(Utc.with_ymd_and_hms(2026, 5, 7, 10, 0, 0).unwrap())
     }
 
-    fn ok_args() -> (PaymentHash, WalletId, MilliSatoshi, u32, BoltInvoice) {
+    fn ok_args() -> (
+        PaymentHash,
+        Preimage,
+        WalletId,
+        Option<MilliSatoshi>,
+        u32,
+        BoltInvoice,
+    ) {
         (
             PaymentHash::from([0xaa; 32]),
+            Preimage::from([0xee; 32]),
             WalletId::from(Uuid::now_v7()),
-            MilliSatoshi::new(1_000_000),
+            Some(MilliSatoshi::new(1_000_000)),
             3600,
             BoltInvoice::new("lnbc1u1pj..."),
         )
@@ -328,21 +350,34 @@ mod tests {
 
     #[test]
     fn try_new_happy_path_constructs_new_invoice() {
-        let (h, w, a, e, b) = ok_args();
+        let (h, pre, w, a, e, b) = ok_args();
         let now = fixed_now();
-        let new = NewInvoice::try_new(h, w, a, e, b, now).expect("happy path");
-        assert_eq!(new.amount_msat, MilliSatoshi::new(1_000_000));
+        let new = NewInvoice::try_new(h, pre, w, a, e, b, now).expect("happy path");
+        assert_eq!(new.amount_msat, Some(MilliSatoshi::new(1_000_000)));
+        assert_eq!(new.payment_preimage, pre);
         assert_eq!(new.created_at, now);
         let expected_expiry = Timestamp::from(now.into_inner() + chrono::Duration::seconds(3600));
         assert_eq!(new.expiry_at, expected_expiry);
     }
 
     #[test]
+    fn try_new_accepts_amountless() {
+        // Amountless invoices (None) carry no nominal amount — the
+        // settled amount is sourced from the received HTLCs at Held
+        // time. AC4 aggregate-interface prep for Story 5.1's
+        // `lnNoAmountInvoiceCreate` entrypoint.
+        let (h, pre, w, _, e, b) = ok_args();
+        let new = NewInvoice::try_new(h, pre, w, None, e, b, fixed_now()).unwrap();
+        assert_eq!(new.amount_msat, None);
+    }
+
+    #[test]
     fn try_new_coerces_expiry_below_min_to_default() {
-        let (h, w, a, _, b) = ok_args();
+        let (h, pre, w, a, _, b) = ok_args();
         let now = fixed_now();
         let low_expiry = BTC_INVOICE_MIN_SECONDS - 1;
-        let new = NewInvoice::try_new(h, w, a, low_expiry, b, now).expect("coerced, not rejected");
+        let new =
+            NewInvoice::try_new(h, pre, w, a, low_expiry, b, now).expect("coerced, not rejected");
         let expected_expiry = Timestamp::from(
             now.into_inner() + chrono::Duration::seconds(i64::from(BTC_INVOICE_DEFAULT_SECONDS)),
         );
@@ -351,10 +386,11 @@ mod tests {
 
     #[test]
     fn try_new_coerces_expiry_above_max_to_default() {
-        let (h, w, a, _, b) = ok_args();
+        let (h, pre, w, a, _, b) = ok_args();
         let now = fixed_now();
         let high_expiry = BTC_INVOICE_MAX_SECONDS + 1;
-        let new = NewInvoice::try_new(h, w, a, high_expiry, b, now).expect("coerced, not rejected");
+        let new =
+            NewInvoice::try_new(h, pre, w, a, high_expiry, b, now).expect("coerced, not rejected");
         let expected_expiry = Timestamp::from(
             now.into_inner() + chrono::Duration::seconds(i64::from(BTC_INVOICE_DEFAULT_SECONDS)),
         );
@@ -362,38 +398,41 @@ mod tests {
     }
 
     #[test]
-    fn try_new_rejects_zero_amount() {
-        let (h, w, _, e, b) = ok_args();
-        let err = NewInvoice::try_new(h, w, MilliSatoshi::ZERO, e, b, fixed_now()).unwrap_err();
+    fn try_new_rejects_some_zero_amount() {
+        let (h, pre, w, _, e, b) = ok_args();
+        let err = NewInvoice::try_new(h, pre, w, Some(MilliSatoshi::ZERO), e, b, fixed_now())
+            .unwrap_err();
         assert!(matches!(err, InvoiceError::InvalidAmount));
     }
 
     #[test]
     fn try_new_accepts_minimum_expiry() {
-        let (h, w, a, _, b) = ok_args();
-        assert!(NewInvoice::try_new(h, w, a, BTC_INVOICE_MIN_SECONDS, b, fixed_now()).is_ok());
+        let (h, pre, w, a, _, b) = ok_args();
+        assert!(NewInvoice::try_new(h, pre, w, a, BTC_INVOICE_MIN_SECONDS, b, fixed_now()).is_ok());
     }
 
     #[test]
     fn try_new_accepts_maximum_expiry() {
-        let (h, w, a, _, b) = ok_args();
-        assert!(NewInvoice::try_new(h, w, a, BTC_INVOICE_MAX_SECONDS, b, fixed_now()).is_ok());
+        let (h, pre, w, a, _, b) = ok_args();
+        assert!(NewInvoice::try_new(h, pre, w, a, BTC_INVOICE_MAX_SECONDS, b, fixed_now()).is_ok());
     }
 
     #[test]
     fn try_from_events_reconstructs_open_invoice() {
-        let (h, w, a, e, b) = ok_args();
+        let (h, pre, w, a, e, b) = ok_args();
         let now = fixed_now();
-        let new = NewInvoice::try_new(h, w, a, e, b, now).unwrap();
+        let new = NewInvoice::try_new(h, pre, w, a, e, b, now).unwrap();
         let id = new.id;
         let entity_events = new.into_events();
         let invoice = Invoice::try_from_events(entity_events).expect("hydrate");
         assert_eq!(invoice.id, id);
         assert_eq!(invoice.state, InvoiceState::Open);
-        assert_eq!(invoice.amount_msat, MilliSatoshi::new(1_000_000));
+        assert_eq!(invoice.amount_msat, Some(MilliSatoshi::new(1_000_000)));
         assert_eq!(invoice.created_at, now);
-        assert!(invoice.payment_preimage.is_none());
+        // Per AC3: payment_preimage is Some from creation (not only after Settled).
+        assert_eq!(invoice.payment_preimage, pre);
         assert!(invoice.canceled_reason.is_none());
+        assert!(invoice.held_amount_msat.is_none());
     }
 
     #[test]
@@ -412,11 +451,11 @@ mod tests {
         ));
     }
 
-    // ---- Story 2.3: command-method state machine ----------------------
+    // ---- Story 2.3/2.4: command-method state machine -------------------
 
     fn fresh_invoice() -> Invoice {
-        let (h, w, a, e, b) = ok_args();
-        let new = NewInvoice::try_new(h, w, a, e, b, fixed_now()).unwrap();
+        let (h, pre, w, a, e, b) = ok_args();
+        let new = NewInvoice::try_new(h, pre, w, a, e, b, fixed_now()).unwrap();
         Invoice::try_from_events(new.into_events()).unwrap()
     }
 
@@ -449,13 +488,17 @@ mod tests {
     }
 
     #[test]
-    fn mark_held_from_open_executes() {
+    fn mark_held_from_open_sets_held_amount() {
+        // `held_amount_msat` is load-bearing for AC12 outbox amount
+        // reconciliation across `Held → Settled` / `Canceled`. Catches
+        // a regression where the field stops being populated by
+        // `mark_held`.
         let mut inv = fresh_invoice();
-        let outcome = inv
-            .mark_held(MilliSatoshi::new(1_000_000), fixed_now())
-            .unwrap();
+        let htlc = MilliSatoshi::new(750_000);
+        let outcome = inv.mark_held(htlc, fixed_now()).unwrap();
         assert!(matches!(outcome, Idempotent::Executed(())));
         assert_eq!(inv.state, InvoiceState::Held);
+        assert_eq!(inv.held_amount_msat, Some(htlc));
     }
 
     #[test]
@@ -465,7 +508,6 @@ mod tests {
         let outcome = inv.settle(preimage, fixed_now()).unwrap();
         assert!(matches!(outcome, Idempotent::Executed(())));
         assert_eq!(inv.state, InvoiceState::Settled);
-        assert_eq!(inv.payment_preimage, Some(preimage));
     }
 
     #[test]
@@ -491,7 +533,7 @@ mod tests {
     fn cancel_from_held_executes() {
         let mut inv = fresh_invoice();
         push_event(&mut inv, sample_held_event(), InvoiceState::Held);
-        let outcome = inv.cancel(CancelReason::Manual, fixed_now()).unwrap();
+        let outcome = inv.cancel(CancelReason::Expired, fixed_now()).unwrap();
         assert!(matches!(outcome, Idempotent::Executed(())));
         assert_eq!(inv.state, InvoiceState::Canceled);
     }
@@ -571,17 +613,53 @@ mod tests {
     // ---- TryFromEvents fold --------------------------------------------
 
     #[test]
-    fn try_from_events_reconstructs_settled_after_held_invoice() {
-        // Fold over Created → HtlcHeld → Settled.
-        let (h, w, a, e, b) = ok_args();
-        let new = NewInvoice::try_new(h, w, a, e, b, fixed_now()).unwrap();
+    fn try_from_events_held_sets_held_amount() {
+        // Hydration must reconstruct `held_amount_msat` from the
+        // `HtlcHeld` event so AC12 outbox amount reconciliation works
+        // across a process restart. Catches a regression where the
+        // builder fold omits the field.
+        let (h, pre, w, a, e, b) = ok_args();
+        let new = NewInvoice::try_new(h, pre, w, a, e, b, fixed_now()).unwrap();
         let id = new.id;
-        let preimage = Preimage::from([0xee; 32]);
+        let htlc = MilliSatoshi::new(420_000);
+        let held_at = fixed_now();
         let events = EntityEvents::init(
             id,
             [
                 InvoiceEvent::Created {
                     payment_hash: h,
+                    payment_preimage: pre,
+                    wallet_id: w,
+                    amount_msat: a,
+                    expiry_at: Timestamp::from(
+                        held_at.into_inner() + chrono::Duration::seconds(i64::from(e)),
+                    ),
+                    bolt_invoice: BoltInvoice::new("lnbc1u1pj..."),
+                    created_at: fixed_now(),
+                },
+                InvoiceEvent::HtlcHeld {
+                    held_at,
+                    htlc_amount_msat: htlc,
+                },
+            ],
+        );
+        let invoice = Invoice::try_from_events(events).unwrap();
+        assert_eq!(invoice.state, InvoiceState::Held);
+        assert_eq!(invoice.held_amount_msat, Some(htlc));
+    }
+
+    #[test]
+    fn try_from_events_reconstructs_settled_after_held_invoice() {
+        // Fold over Created → HtlcHeld → Settled.
+        let (h, pre, w, a, e, b) = ok_args();
+        let new = NewInvoice::try_new(h, pre, w, a, e, b, fixed_now()).unwrap();
+        let id = new.id;
+        let events = EntityEvents::init(
+            id,
+            [
+                InvoiceEvent::Created {
+                    payment_hash: h,
+                    payment_preimage: pre,
                     wallet_id: w,
                     amount_msat: a,
                     expiry_at: Timestamp::from(
@@ -592,29 +670,30 @@ mod tests {
                 },
                 InvoiceEvent::HtlcHeld {
                     held_at: fixed_now(),
-                    htlc_amount_msat: a,
+                    htlc_amount_msat: MilliSatoshi::new(1_000_000),
                 },
                 InvoiceEvent::Settled {
                     settled_at: fixed_now(),
-                    payment_preimage: preimage,
+                    payment_preimage: pre,
                 },
             ],
         );
         let invoice = Invoice::try_from_events(events).unwrap();
         assert_eq!(invoice.state, InvoiceState::Settled);
-        assert_eq!(invoice.payment_preimage, Some(preimage));
+        assert_eq!(invoice.payment_preimage, pre);
     }
 
     #[test]
     fn try_from_events_reconstructs_canceled_invoice() {
-        let (h, w, a, e, b) = ok_args();
-        let new = NewInvoice::try_new(h, w, a, e, b, fixed_now()).unwrap();
+        let (h, pre, w, a, e, b) = ok_args();
+        let new = NewInvoice::try_new(h, pre, w, a, e, b, fixed_now()).unwrap();
         let id = new.id;
         let events = EntityEvents::init(
             id,
             [
                 InvoiceEvent::Created {
                     payment_hash: h,
+                    payment_preimage: pre,
                     wallet_id: w,
                     amount_msat: a,
                     expiry_at: Timestamp::from(

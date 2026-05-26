@@ -18,30 +18,42 @@ use serde_json::json;
 use blink_lightning_gateway::api::graphql::{build_schema, GatewaySchema};
 use blink_lightning_gateway::app::{App, InvoiceUpdateDispatcher};
 use blink_lightning_gateway::lnd::{
-    AddInvoiceParams, AddInvoiceResponse, FeeProbeParams, FeeProbeResponse, LndApi, LndError,
-    SendPaymentParams, SendPaymentResponse,
+    AddHoldInvoiceParams, AddHoldInvoiceResponse, FeeProbeParams, FeeProbeResponse, InvoiceUpdate,
+    LndApi, LndError, SendPaymentParams, SendPaymentResponse,
 };
 use blink_lightning_gateway::outbox::EventPublisher;
-use blink_lightning_gateway::primitives::{BoltInvoice, PaymentHash};
+use blink_lightning_gateway::primitives::{BoltInvoice, PaymentHash, Preimage};
 use blink_lightning_gateway::symphony::{LightningSymphonyClient, SymphonyClient};
 
 use crate::common::TestDatabase;
 
 /// Hand-written stub LND. Integration tests are a separate compilation
 /// unit, so they can't see the lib's `MockLndApi` (gated on lib `cfg(test)`).
-/// The trait has one method, so this is trivial — see Story 1.4 Dev Notes.
 struct CannedLnd {
-    canned_payment_hash: [u8; 32],
     canned_bolt_invoice: &'static str,
 }
 
 #[async_trait]
 impl LndApi for CannedLnd {
-    async fn add_invoice(&self, _params: AddInvoiceParams) -> Result<AddInvoiceResponse, LndError> {
-        Ok(AddInvoiceResponse {
-            payment_hash: PaymentHash::from(self.canned_payment_hash),
+    async fn add_hold_invoice(
+        &self,
+        _params: AddHoldInvoiceParams,
+    ) -> Result<AddHoldInvoiceResponse, LndError> {
+        Ok(AddHoldInvoiceResponse {
             bolt_invoice: BoltInvoice::new(self.canned_bolt_invoice),
         })
+    }
+
+    async fn settle_invoice(&self, _preimage: Preimage) -> Result<(), LndError> {
+        Ok(())
+    }
+
+    async fn cancel_invoice(&self, _payment_hash: PaymentHash) -> Result<(), LndError> {
+        Ok(())
+    }
+
+    async fn lookup_invoice(&self, _payment_hash: PaymentHash) -> Result<InvoiceUpdate, LndError> {
+        Err(LndError::Stub)
     }
 
     async fn send_payment(
@@ -81,7 +93,6 @@ async fn ln_invoice_create_persists_invoice_and_event_rows() {
     let pool = db.pool.clone();
 
     let lnd: Arc<dyn LndApi> = Arc::new(CannedLnd {
-        canned_payment_hash: [0xaa; 32],
         canned_bolt_invoice: "lnbc10n1pj1234testbolt11invoice",
     });
     let outbox = EventPublisher::new(&pool);
@@ -121,9 +132,13 @@ async fn ln_invoice_create_persists_invoice_and_event_rows() {
         "resolver errors: {resolver_errors:?}"
     );
     let invoice = payload.get("invoice").unwrap();
-    assert_eq!(
-        invoice.get("paymentHash").unwrap().as_str().unwrap(),
-        "aa".repeat(32)
+    // Story 2.4: hash is gateway-derived from a random preimage, no longer
+    // canned by LND. Verify shape (64-char hex) rather than a fixed value.
+    let payment_hash = invoice.get("paymentHash").unwrap().as_str().unwrap();
+    assert_eq!(payment_hash.len(), 64, "payment_hash hex length");
+    assert!(
+        payment_hash.chars().all(|c| c.is_ascii_hexdigit()),
+        "payment_hash hex form"
     );
     let payment_request = invoice.get("paymentRequest").unwrap().as_str().unwrap();
     assert!(payment_request.starts_with("lnbc"));

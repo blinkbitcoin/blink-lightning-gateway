@@ -47,7 +47,13 @@ impl Mutation {
                     payment_hash: GqlPaymentHash(invoice.payment_hash),
                     payment_request: LnPaymentRequest(invoice.bolt_invoice.as_str().to_owned()),
                     payment_secret: LnPaymentSecret(String::new()),
-                    satoshis: SatAmount(invoice.amount_msat.as_u64() / 1000),
+                    satoshis: SatAmount(
+                        invoice
+                            .amount_msat
+                            .expect("lnInvoiceCreate always supplies Some(amount_msat)")
+                            .as_u64()
+                            / 1000,
+                    ),
                 }),
             }),
             Err(e) => Ok(LnInvoicePayload {
