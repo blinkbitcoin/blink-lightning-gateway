@@ -1,7 +1,7 @@
 //! Shared helpers reachable from every per-use-case `impl App` block.
 //!
 //! Free functions are crate-visible. `check_wallet_ownership` is a
-//! method on `App` (still stubbed for Story 2.5) but lives here so all
+//! method on `App` (still stubbed for Story 3.1) but lives here so all
 //! per-use-case files can call it without each owning its own copy.
 
 use crate::app::{App, AppError};
@@ -52,7 +52,7 @@ pub(crate) fn lnd_error_to_failure_reason(err: &LndError) -> FailureReason {
 }
 
 impl App {
-    /// STUB(story-2.5): replace with Apollo Router entity sub-query + TTL
+    /// STUB(story-3.1): replace with Apollo Router entity sub-query + TTL
     /// cache.
     pub(crate) async fn check_wallet_ownership(
         &self,

@@ -48,7 +48,7 @@ impl App {
     pub async fn send_payment(&self, request: SendPaymentRequest) -> Result<Payment, AppError> {
         let now = Timestamp::now();
 
-        // 1. STUB(story-2.5): wallet-ownership check.
+        // 1. STUB(story-3.1): wallet-ownership check.
         self.check_wallet_ownership(&request.wallet_id).await?;
 
         // 2. Decode the BOLT11.
@@ -79,9 +79,9 @@ impl App {
             .map_err(PaymentError::from)?;
         tx.commit().await?;
 
-        // 5. Symphony authorize. STUB(story-2.5): real
+        // 5. Symphony authorize. STUB(story-3.1): real
         //    `Symphony::authorize_spend` roundtrip lands in the cross-repo
-        //    PR + Story 2.5. ADR-0003: when un-stubbed it MUST run
+        //    PR + Story 3.1. ADR-0003: when un-stubbed it MUST run
         //    synchronously and atomically (check + Cala hold) and fail
         //    closed. `correlation_id == idempotency_key == payment_hash`
         //    is deliberate (B6 review decision): LND's own payment-hash

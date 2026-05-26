@@ -207,7 +207,7 @@ impl App {
             LndInvoiceState::Accepted => {
                 self.transition_to_held(invoice, payment_hash, update.htlc_amount_msat, now)
                     .await?;
-                // STUB(story-2.5): business gate (wallet-ownership /
+                // STUB(story-3.1): business gate (wallet-ownership /
                 // price-lock checks) — always passes for now. Story 2.4's
                 // HODL substrate auto-settles every accepted HTLC so the
                 // gateway preserves "regular invoice" UX on top of the

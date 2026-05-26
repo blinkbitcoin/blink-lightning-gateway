@@ -17,7 +17,7 @@ use crate::primitives::{PaymentHash, Timestamp};
 impl App {
     /// Release the preimage on a held HODL invoice. Called automatically
     /// by `handle_invoice_update`'s `Accepted` arm after the business
-    /// gate (stubbed in Story 2.4); Story 2.5 introduces gated callers.
+    /// gate (stubbed in Story 2.4); Story 3.1 introduces gated callers.
     ///
     /// Idempotent in two layers: a `NotFound` lookup is a quiet skip
     /// (absorbs create/listener races); `Idempotent::AlreadyApplied`

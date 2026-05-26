@@ -7,7 +7,7 @@
 //! - CANCELED — transition `Held → Canceled` with `CancelReason::Expired`;
 //!   emit `LightningInvoiceCanceled` at `held_amount_msat`.
 //! - ACCEPTED — still legitimately held; no-op (the auto-settle path
-//!   hasn't run yet, OR Story 2.5's business gate is in progress, OR
+//!   hasn't run yet, OR Story 3.1's business gate is in progress, OR
 //!   we're just between ticks).
 //! - OPEN — unexpected (DB carries a `Held` event but LND says no HTLC
 //!   parked); `warn!` and no-op.

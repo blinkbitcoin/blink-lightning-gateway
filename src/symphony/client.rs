@@ -6,7 +6,7 @@
 //! Symphony's `LightningAuthorizationService` (a new RPC; today's
 //! Symphony only carries `CardAuthorizationService`) lands in the
 //! cross-repo PR (Story 2.2 AC14) and is wired on the gateway side
-//! by Story 2.5 per ADR-0001's stub-un-stub schedule.
+//! by Story 3.1 per ADR-0001's stub-un-stub schedule.
 //!
 //! Trait shape mirrors `blink-card/src/symphony/client.rs:24-110`, but
 //! the request message is deliberately NOT a copy of blink-card's —
@@ -15,7 +15,7 @@
 //! `exchange_rate` / `merchant_info` / request-side `authorization_id`
 //! are fiat/card-specific and are left behind (CLAUDE.md: "blink-card
 //! → leave behind card-specific code"). The typed `AccountRef` from
-//! ADR-0003 §4 lands with the Story 2.5 un-stub; Slice 2 keeps a plain
+//! ADR-0003 §4 lands with the Story 3.1 un-stub; Slice 2 keeps a plain
 //! `account_id` string on the stub path.
 
 use serde::{Deserialize, Serialize};
@@ -44,7 +44,7 @@ pub struct SymphonyAuthorizeRequest {
     pub correlation_id: String,
     /// Account the spend is gated against. Slice 2 passes the
     /// `wallet_id` string; ADR-0003's typed `AccountRef { kind, id }`
-    /// replaces this in the Story 2.5 un-stub.
+    /// replaces this in the Story 3.1 un-stub.
     pub account_id: String,
     /// Amount to authorize, in satoshis.
     pub sat_amount: u64,
@@ -68,10 +68,10 @@ pub trait SymphonyClient: Send + Sync {
     ) -> Result<SymphonyAuthorizeResponse, SymphonyError>;
 }
 
-/// STUB(story-2.5): always returns `Approved`. The real synchronous
+/// STUB(story-3.1): always returns `Approved`. The real synchronous
 /// gRPC handshake to Symphony's `LightningAuthorizationService` lands
 /// in the cross-repo Symphony PR (Story 2.2 AC14); the gateway-side
-/// wiring lands in Story 2.5. Loud in code so reviewers know what is
+/// wiring lands in Story 3.1. Loud in code so reviewers know what is
 /// deferred and what is wired.
 #[derive(Clone, Debug, Default)]
 pub struct LightningSymphonyClient {
@@ -96,7 +96,7 @@ impl SymphonyClient for LightningSymphonyClient {
         ::tracing::debug!(
             correlation_id = %request.correlation_id,
             sat_amount = request.sat_amount,
-            "STUB(story-2.5): authorize_spend always-approved"
+            "STUB(story-3.1): authorize_spend always-approved"
         );
         Ok(SymphonyAuthorizeResponse {
             status: SymphonyAuthorizeStatus::Approved,

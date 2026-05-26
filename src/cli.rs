@@ -130,7 +130,7 @@ async fn run_cmd(config: Config) -> anyhow::Result<()> {
 
     // Story 2.2 ships a stub `LightningSymphonyClient` that always
     // returns `Approved`. Real wiring against Symphony's
-    // `LightningAuthorizationService` lands in Story 2.5.
+    // `LightningAuthorizationService` lands in Story 3.1.
     let symphony: Arc<dyn SymphonyClient> = Arc::new(LightningSymphonyClient::new(
         config.symphony.grpc_endpoint.clone(),
     ));
