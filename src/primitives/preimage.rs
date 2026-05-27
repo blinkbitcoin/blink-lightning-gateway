@@ -136,6 +136,13 @@ impl<'r> Decode<'r, Postgres> for Preimage {
     }
 }
 
+// Required by `EsRepo`'s auto-generated batch ops binding `Vec<&Preimage>`.
+impl sqlx::postgres::PgHasArrayType for Preimage {
+    fn array_type_info() -> sqlx::postgres::PgTypeInfo {
+        <Vec<u8> as sqlx::postgres::PgHasArrayType>::array_type_info()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,12 +1,8 @@
-//! Story 2.4 AC17 — HOLD invoice settle-within-window E2E.
-//!
-//! `App::create_invoice` issues a HODL invoice → drive a synthetic
-//! `Accepted` `InvoiceUpdate` through `App::handle_invoice_update` →
-//! the Accepted arm runs `transition_to_held` (commits `LightningHtlcHeld`
-//! outbox row) then the auto-settle runs (`App::settle_hold_invoice` →
-//! `LndApi::settle_invoice` → commits `LightningInvoiceSettled` outbox row).
-//! Asserts the Held outbox amount equals the Settled outbox amount
-//! (AC12 pending-layer reconciliation).
+//! HOLD-invoice settle E2E. Accepted → `transition_to_held` (Held
+//! outbox) → `settle_hold_invoice` (LookupInvoice + SettleInvoice +
+//! commit_settle) writes the Settled outbox and projection in one
+//! path (blink-core parity). The subsequent synthetic Settled echo
+//! must be a pure no-op.
 
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -77,8 +73,14 @@ impl LndApi for RecordingLnd {
         Ok(())
     }
 
-    async fn lookup_invoice(&self, _payment_hash: PaymentHash) -> Result<InvoiceUpdate, LndError> {
-        Err(LndError::Stub)
+    async fn lookup_invoice(&self, payment_hash: PaymentHash) -> Result<InvoiceUpdate, LndError> {
+        // Canned ACCEPTED for the happy-path settle_hold_invoice flow.
+        Ok(InvoiceUpdate {
+            payment_hash,
+            state: LndInvoiceState::Accepted,
+            amt_paid_msat: MilliSatoshi::new(500_000),
+            payment_preimage: None,
+        })
     }
 
     async fn send_payment(
@@ -128,40 +130,29 @@ async fn hold_invoice_settle_within_window_e2e() {
     assert_eq!(add_calls[0], inv.payment_hash);
     drop(add_calls);
 
-    // Step 2 — synthetic Accepted update. The Accepted arm runs
-    // `transition_to_held` (commits LightningHtlcHeld outbox row), then
-    // the stubbed business gate passes, then `settle_hold_invoice` calls
-    // LND `settle_invoice` and commits the LightningInvoiceSettled row.
-    let htlc_amount = MilliSatoshi::new(500_000);
+    // Step 2 — synthetic Accepted. transition_to_held writes Held;
+    // settle_hold_invoice runs LookupInvoice + SettleInvoice + commit_settle
+    // so the Settled row + projection land in the same path.
+    let parked = MilliSatoshi::new(500_000);
     app.handle_invoice_update(InvoiceUpdate {
         payment_hash: inv.payment_hash,
         state: LndInvoiceState::Accepted,
-        htlc_amount_msat: htlc_amount,
+        amt_paid_msat: parked,
         payment_preimage: None,
     })
     .await
-    .expect("accepted → auto-settle");
+    .expect("accepted");
 
-    // LND `SettleInvoice` was called exactly once with the gateway-owned
-    // preimage. Catches the regression where the Accepted arm transitions
-    // Held but never actually drives the LND-side settle.
     let settle_calls = lnd.settle_calls.lock().expect("settle_calls lock");
-    assert_eq!(
-        settle_calls.len(),
-        1,
-        "LndApi::settle_invoice must fire after auto-settle"
-    );
+    assert_eq!(settle_calls.len(), 1);
     assert_eq!(settle_calls[0], inv.payment_preimage);
     drop(settle_calls);
-    assert!(
-        lnd.cancel_calls
-            .lock()
-            .expect("cancel_calls lock")
-            .is_empty(),
-        "auto-settle path MUST NOT call cancel_invoice"
-    );
+    assert!(lnd
+        .cancel_calls
+        .lock()
+        .expect("cancel_calls lock")
+        .is_empty());
 
-    // Step 3 — projection is Settled; pending layer reconciles.
     let row: (String,) = sqlx::query_as(r#"SELECT state FROM invoices WHERE payment_hash = $1"#)
         .bind(inv.payment_hash.as_bytes().as_slice())
         .fetch_one(&pool)
@@ -169,8 +160,8 @@ async fn hold_invoice_settle_within_window_e2e() {
         .expect("state row");
     assert_eq!(row.0, "settled");
 
-    let outbox_rows: Vec<(String, String, i64)> = sqlx::query_as(
-        r#"SELECT domain_event_type, event_type, amount_sat
+    let outbox_rows: Vec<(String, String, i64, serde_json::Value)> = sqlx::query_as(
+        r#"SELECT domain_event_type, event_type, amount_sat, gateway_metadata
            FROM outbox_events
            WHERE reference_id = $1
            ORDER BY sequence"#,
@@ -179,22 +170,42 @@ async fn hold_invoice_settle_within_window_e2e() {
     .fetch_all(&pool)
     .await
     .expect("outbox rows");
-    assert_eq!(
-        outbox_rows.len(),
-        2,
-        "Held + Settled outbox rows fired by auto-settle"
-    );
+    assert_eq!(outbox_rows.len(), 2);
     assert_eq!(outbox_rows[0].0, "lightning_htlc_held");
     assert_eq!(outbox_rows[0].1, "INCOMING_PAYMENT_PENDING");
     assert_eq!(outbox_rows[1].0, "lightning_invoice_settled");
     assert_eq!(outbox_rows[1].1, "INCOMING_PAYMENT_CONFIRMED");
+    assert_eq!(outbox_rows[0].2, parked.whole_sat() as i64);
+    assert_eq!(outbox_rows[1].2, parked.whole_sat() as i64);
 
-    // AC12: the amount that books the pending credit at Held equals the
-    // amount that clears it at Settled. Both come from the persisted
-    // `held_amount_msat`, so they MUST be identical.
+    let settled_meta = &outbox_rows[1].3;
     assert_eq!(
-        outbox_rows[0].2, outbox_rows[1].2,
-        "Held outbox amount must equal Settled outbox amount (pending-layer reconciliation)"
+        settled_meta.get("amt_paid_msat").and_then(|v| v.as_u64()),
+        Some(parked.as_u64())
     );
-    assert_eq!(outbox_rows[0].2, htlc_amount.whole_sat() as i64);
+    assert_eq!(
+        settled_meta
+            .get("held_amount_msat")
+            .and_then(|v| v.as_u64()),
+        Some(parked.as_u64())
+    );
+
+    // Step 3 — Settled wire event is observation-only; no extra outbox
+    // row, no extra SettleInvoice.
+    app.handle_invoice_update(InvoiceUpdate {
+        payment_hash: inv.payment_hash,
+        state: LndInvoiceState::Settled,
+        amt_paid_msat: parked,
+        payment_preimage: Some(inv.payment_preimage),
+    })
+    .await
+    .expect("settled echo is no-op");
+    let post_count: (i64,) =
+        sqlx::query_as(r#"SELECT COUNT(*) FROM outbox_events WHERE reference_id = $1"#)
+            .bind(inv.payment_hash.to_hex())
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+    assert_eq!(post_count.0, 2);
+    assert_eq!(lnd.settle_calls.lock().expect("settle_calls lock").len(), 1);
 }

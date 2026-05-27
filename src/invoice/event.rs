@@ -59,7 +59,6 @@ pub enum InvoiceEvent {
     },
     Settled {
         settled_at: Timestamp,
-        payment_preimage: Preimage,
     },
     Canceled {
         canceled_at: Timestamp,

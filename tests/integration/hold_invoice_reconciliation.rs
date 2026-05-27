@@ -1,4 +1,4 @@
-//! Story 2.4 (2026-05-26 pivot) — `App::reconcile_held_invoice` E2E.
+//! `App::reconcile_held_invoice` E2E.
 //!
 //! Seed a Held invoice, then for each branch of LND's possible state
 //! drive `reconcile_held_invoice` (the same code path the 5-min
@@ -7,12 +7,18 @@
 //!
 //! Three cases:
 //!   1. DB Held + LND SETTLED  → projection transitions Held→Settled;
-//!      outbox emits `LightningInvoiceSettled` at `held_amount_msat`;
-//!      LND `SettleInvoice` is NOT called (LND already settled).
+//!      outbox `amount_sat` = `lnd_state.amt_paid_msat` (LND-truth);
+//!      `gateway_metadata.held_amount_msat` carries the original
+//!      reservation for Symphony's pending-layer offset.
+//!      LND `SettleInvoice` is NOT called.
 //!   2. DB Held + LND CANCELED → projection transitions Held→Canceled;
-//!      outbox emits `LightningInvoiceCanceled` at `held_amount_msat`;
-//!      LND `CancelInvoice` is NOT called (LND already canceled).
-//!   3. DB Held + LND ACCEPTED → no-op; no outbox row, no state change.
+//!      outbox `amount_sat` = `lnd_state.amt_paid_msat` (typically 0
+//!      for canceled invoices); `gateway_metadata.held_amount_msat`
+//!      carries the original reservation. LND `CancelInvoice` is NOT
+//!      called.
+//!   3. DB Held + LND ACCEPTED → reconcile drives SettleInvoice +
+//!      commit_settle (blink-core parity — self-heal a transient
+//!      SettleInvoice failure from the original Accepted-arm).
 
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -138,16 +144,19 @@ async fn reconcile_held_to_settled_when_lnd_says_settled() {
     let db = TestDatabase::new().await.expect("test db");
     let pool = db.pool.clone();
 
-    // Build the LND lookup result BEFORE seeding so the stub knows its
-    // canned answer.
+    // Simulate the MPP-overpayment / late-shard scenario: LND's
+    // settled amount (amt_paid_msat) is larger than what was originally
+    // parked at HOLD time. The outbox `amount_sat` MUST track LND's
+    // truth; the metadata MUST carry the original reservation.
     let preimage_for_lookup = Preimage::from([0xee; 32]);
-    let lnd_result = InvoiceUpdate {
-        payment_hash: PaymentHash::from([0u8; 32]), // overwritten below — irrelevant since reconcile bypasses the mismatch check via wire-side check we already covered
+    let final_settled = MilliSatoshi::new(850_000); // > parked (750_000)
+    let lnd_result_placeholder = InvoiceUpdate {
+        payment_hash: PaymentHash::from([0u8; 32]),
         state: LndInvoiceState::Settled,
-        htlc_amount_msat: MilliSatoshi::new(750_000),
+        amt_paid_msat: final_settled,
         payment_preimage: Some(preimage_for_lookup),
     };
-    let lnd = Arc::new(LookupStubLnd::new(lnd_result));
+    let lnd = Arc::new(LookupStubLnd::new(lnd_result_placeholder));
     let (_, payment_hash, parked) = seed_held_invoice(&pool, lnd.clone()).await;
 
     // Re-build the LND result with the actual seeded payment_hash so
@@ -155,7 +164,7 @@ async fn reconcile_held_to_settled_when_lnd_says_settled() {
     let lookup_result = InvoiceUpdate {
         payment_hash,
         state: LndInvoiceState::Settled,
-        htlc_amount_msat: parked,
+        amt_paid_msat: final_settled,
         payment_preimage: Some(preimage_for_lookup),
     };
     let outbox = EventPublisher::new(&pool);
@@ -181,9 +190,12 @@ async fn reconcile_held_to_settled_when_lnd_says_settled() {
         .expect("state row");
     assert_eq!(row.0, "settled");
 
-    // Outbox shows the Settled row at the parked amount (AC12).
-    let outbox_rows: Vec<(String, String, i64)> = sqlx::query_as(
-        r#"SELECT domain_event_type, event_type, amount_sat
+    // Outbox Settled row: `amount_sat` reflects LND's `amt_paid_msat`
+    // (the final settled amount, possibly > original parked due to
+    // late MPP shards). `held_amount_msat` in metadata preserves the
+    // original reservation so Symphony can offset the pending.
+    let outbox_rows: Vec<(String, String, i64, serde_json::Value)> = sqlx::query_as(
+        r#"SELECT domain_event_type, event_type, amount_sat, gateway_metadata
            FROM outbox_events
            WHERE reference_id = $1
            ORDER BY sequence"#,
@@ -195,7 +207,21 @@ async fn reconcile_held_to_settled_when_lnd_says_settled() {
     assert_eq!(outbox_rows.len(), 1);
     assert_eq!(outbox_rows[0].0, "lightning_invoice_settled");
     assert_eq!(outbox_rows[0].1, "INCOMING_PAYMENT_CONFIRMED");
-    assert_eq!(outbox_rows[0].2, parked.whole_sat() as i64);
+    // LND-fresh, NOT parked.
+    assert_eq!(outbox_rows[0].2, final_settled.whole_sat() as i64);
+    // Metadata mirrors blink-core's pattern: amt_paid_msat for the
+    // settled amount, held_amount_msat for the original reservation.
+    let meta = &outbox_rows[0].3;
+    assert_eq!(
+        meta.get("amt_paid_msat").and_then(|v| v.as_u64()),
+        Some(final_settled.as_u64()),
+        "metadata.amt_paid_msat MUST equal LND's final settled amount"
+    );
+    assert_eq!(
+        meta.get("held_amount_msat").and_then(|v| v.as_u64()),
+        Some(parked.as_u64()),
+        "metadata.held_amount_msat MUST equal the originally-parked reservation"
+    );
 
     // Reconcile does NOT call settle_invoice on LND — LND already
     // settled (which is why we're catching up via lookup). Calling
@@ -224,7 +250,7 @@ async fn reconcile_held_to_canceled_when_lnd_says_canceled() {
     let lnd_result_placeholder = InvoiceUpdate {
         payment_hash: PaymentHash::from([0u8; 32]),
         state: LndInvoiceState::Canceled,
-        htlc_amount_msat: MilliSatoshi::ZERO,
+        amt_paid_msat: MilliSatoshi::ZERO,
         payment_preimage: None,
     };
     let lnd = Arc::new(LookupStubLnd::new(lnd_result_placeholder));
@@ -234,7 +260,7 @@ async fn reconcile_held_to_canceled_when_lnd_says_canceled() {
     let lookup_result = InvoiceUpdate {
         payment_hash,
         state: LndInvoiceState::Canceled,
-        htlc_amount_msat: MilliSatoshi::ZERO,
+        amt_paid_msat: MilliSatoshi::ZERO,
         payment_preimage: None,
     };
     let outbox = EventPublisher::new(&pool);
@@ -259,9 +285,12 @@ async fn reconcile_held_to_canceled_when_lnd_says_canceled() {
         .expect("state row");
     assert_eq!(row.0, "canceled");
 
-    // AC12: cleared at the persisted parked amount, not 0.
-    let outbox_rows: Vec<(String, String, i64)> = sqlx::query_as(
-        r#"SELECT domain_event_type, event_type, amount_sat
+    // Outbox Canceled row: `amount_sat` reflects LND's `amt_paid_msat`
+    // (0 for a CANCELED invoice — HTLCs were released, not settled).
+    // `held_amount_msat` in metadata preserves the original
+    // reservation so Symphony's pending-layer release offsets it.
+    let outbox_rows: Vec<(String, String, i64, serde_json::Value)> = sqlx::query_as(
+        r#"SELECT domain_event_type, event_type, amount_sat, gateway_metadata
            FROM outbox_events
            WHERE reference_id = $1
            ORDER BY sequence"#,
@@ -273,7 +302,18 @@ async fn reconcile_held_to_canceled_when_lnd_says_canceled() {
     assert_eq!(outbox_rows.len(), 1);
     assert_eq!(outbox_rows[0].0, "lightning_invoice_canceled");
     assert_eq!(outbox_rows[0].1, "INCOMING_PAYMENT_CANCELED");
-    assert_eq!(outbox_rows[0].2, parked.whole_sat() as i64);
+    assert_eq!(outbox_rows[0].2, 0, "LND-canceled has amt_paid_msat=0");
+    let meta = &outbox_rows[0].3;
+    assert_eq!(
+        meta.get("amt_paid_msat").and_then(|v| v.as_u64()),
+        Some(0),
+        "metadata.amt_paid_msat MUST equal LND's amt_paid_msat at cancel time"
+    );
+    assert_eq!(
+        meta.get("held_amount_msat").and_then(|v| v.as_u64()),
+        Some(parked.as_u64()),
+        "metadata.held_amount_msat MUST preserve the originally-parked reservation"
+    );
 
     assert!(
         lnd.cancel_calls
@@ -285,14 +325,18 @@ async fn reconcile_held_to_canceled_when_lnd_says_canceled() {
 }
 
 #[tokio::test]
-async fn reconcile_held_no_op_when_lnd_says_accepted() {
+async fn reconcile_held_drives_settle_when_lnd_says_accepted() {
+    // Blink-core parity: reconcile re-drives SettleInvoice + commit_settle
+    // when LND is still ACCEPTED. Mirrors the cron-retry path in
+    // `update-single-pending-invoice.ts` — a transient SettleInvoice
+    // failure from the Accepted-arm self-heals on the next reconcile tick.
     let db = TestDatabase::new().await.expect("test db");
     let pool = db.pool.clone();
 
     let lnd_result_placeholder = InvoiceUpdate {
         payment_hash: PaymentHash::from([0u8; 32]),
         state: LndInvoiceState::Accepted,
-        htlc_amount_msat: MilliSatoshi::new(750_000),
+        amt_paid_msat: MilliSatoshi::new(750_000),
         payment_preimage: None,
     };
     let lnd = Arc::new(LookupStubLnd::new(lnd_result_placeholder));
@@ -301,7 +345,7 @@ async fn reconcile_held_no_op_when_lnd_says_accepted() {
     let lookup_result = InvoiceUpdate {
         payment_hash,
         state: LndInvoiceState::Accepted,
-        htlc_amount_msat: parked,
+        amt_paid_msat: parked,
         payment_preimage: None,
     };
     let outbox = EventPublisher::new(&pool);
@@ -319,39 +363,46 @@ async fn reconcile_held_no_op_when_lnd_says_accepted() {
         .await
         .expect("reconcile");
 
-    // Still Held — no state change.
     let row: (String,) = sqlx::query_as(r#"SELECT state FROM invoices WHERE payment_hash = $1"#)
         .bind(payment_hash.as_bytes().as_slice())
         .fetch_one(&pool)
         .await
         .expect("state row");
-    assert_eq!(row.0, "held");
+    assert_eq!(row.0, "settled");
 
-    // No outbox row written — the HtlcHeld outbox row was written
-    // when `seed_held_invoice` ran mark_held + update, but
-    // `mark_held` itself doesn't publish an outbox row (that's
-    // `transition_to_held`'s job in `handle_invoice_update`). So this
-    // count should be 0 for a purely seeded-then-reconciled flow.
-    let outbox_count: (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM outbox_events WHERE reference_id = $1")
-            .bind(payment_hash.to_hex())
-            .fetch_one(&pool)
-            .await
-            .expect("outbox count");
-    assert_eq!(outbox_count.0, 0);
+    // One Settled outbox row at LND's amt_paid_msat; metadata carries
+    // held_amount_msat for Symphony's pending offset.
+    let outbox_rows: Vec<(String, String, i64, serde_json::Value)> = sqlx::query_as(
+        r#"SELECT domain_event_type, event_type, amount_sat, gateway_metadata
+           FROM outbox_events
+           WHERE reference_id = $1
+           ORDER BY sequence"#,
+    )
+    .bind(payment_hash.to_hex())
+    .fetch_all(&pool)
+    .await
+    .expect("outbox rows");
+    assert_eq!(outbox_rows.len(), 1);
+    assert_eq!(outbox_rows[0].0, "lightning_invoice_settled");
+    assert_eq!(outbox_rows[0].1, "INCOMING_PAYMENT_CONFIRMED");
+    assert_eq!(outbox_rows[0].2, parked.whole_sat() as i64);
+    let meta = &outbox_rows[0].3;
+    assert_eq!(
+        meta.get("amt_paid_msat").and_then(|v| v.as_u64()),
+        Some(parked.as_u64())
+    );
+    assert_eq!(
+        meta.get("held_amount_msat").and_then(|v| v.as_u64()),
+        Some(parked.as_u64())
+    );
 
-    assert!(
-        lnd.settle_calls
-            .lock()
-            .expect("settle_calls lock")
-            .is_empty(),
-        "ACCEPTED reconcile MUST NOT call settle_invoice"
-    );
-    assert!(
-        lnd.cancel_calls
-            .lock()
-            .expect("cancel_calls lock")
-            .is_empty(),
-        "ACCEPTED reconcile MUST NOT call cancel_invoice"
-    );
+    // settle_invoice fired exactly once.
+    let settle_calls = lnd.settle_calls.lock().expect("settle_calls lock");
+    assert_eq!(settle_calls.len(), 1);
+    drop(settle_calls);
+    assert!(lnd
+        .cancel_calls
+        .lock()
+        .expect("cancel_calls lock")
+        .is_empty());
 }

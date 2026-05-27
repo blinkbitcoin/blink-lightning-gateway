@@ -84,8 +84,13 @@ impl LndApi for CannedLnd {
         Ok(())
     }
 
-    async fn lookup_invoice(&self, _payment_hash: PaymentHash) -> Result<InvoiceUpdate, LndError> {
-        Err(LndError::Stub)
+    async fn lookup_invoice(&self, payment_hash: PaymentHash) -> Result<InvoiceUpdate, LndError> {
+        Ok(InvoiceUpdate {
+            payment_hash,
+            state: LndInvoiceState::Accepted,
+            amt_paid_msat: MilliSatoshi::new(1_000_000),
+            payment_preimage: None,
+        })
     }
 
     async fn send_payment(
@@ -245,16 +250,16 @@ async fn incoming_invoice_subscription_drives_full_lifecycle() {
     // Brief delay so subscription_loop registers LISTEN.
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // Step 2 — Accepted for B → auto-settles per the new Story 2.4 flow.
-    // Two outbox rows (Held + Settled), state = Settled.
+    // Step 2 — B: Accepted writes Held + Settled rows + projection
+    // (settle_hold_invoice's LookupInvoice + SettleInvoice + commit_settle).
     app.handle_invoice_update(InvoiceUpdate {
         payment_hash: inv_b.payment_hash,
         state: LndInvoiceState::Accepted,
-        htlc_amount_msat: MilliSatoshi::new(1_000_000),
+        amt_paid_msat: MilliSatoshi::new(1_000_000),
         payment_preimage: None,
     })
     .await
-    .expect("hold + auto-settle B");
+    .expect("accepted B");
     assert_state(&pool, &inv_b.payment_hash, "settled").await;
     assert_outbox(&pool, "lightning_htlc_held", "INCOMING_PAYMENT_PENDING", 1).await;
     assert_outbox(
@@ -265,12 +270,12 @@ async fn incoming_invoice_subscription_drives_full_lifecycle() {
     )
     .await;
 
-    // Step 3 — Canceled (Open → Canceled) for C. Single Canceled outbox
-    // row at amount=0 (never-held discriminator from AC12).
+    // Step 3 — C: Open → Canceled (BOLT11 expiry on a never-held
+    // invoice). One Canceled outbox row at amount_sat=0.
     app.handle_invoice_update(InvoiceUpdate {
         payment_hash: inv_c.payment_hash,
         state: LndInvoiceState::Canceled,
-        htlc_amount_msat: MilliSatoshi::ZERO,
+        amt_paid_msat: MilliSatoshi::ZERO,
         payment_preimage: None,
     })
     .await
@@ -284,27 +289,25 @@ async fn incoming_invoice_subscription_drives_full_lifecycle() {
     )
     .await;
 
-    // Step 4 — Accepted for D auto-settles (2 rows), then a wire Settled
-    // is idempotent (0 rows). The Accepted arm's auto-settle goes via the
-    // `LndApi::settle_invoice` mock — the test stub records the call.
-    // Also covers the crash-recovery safety net: LND echoes back Settled
-    // after our SettleInvoice call; the Settled arm must no-op.
+    // Step 4 — D: Accepted, then a Settled wire echo. Echo is
+    // observation-only (Settled arm is a no-op per blink-core parity);
+    // no second Settled outbox row appears.
     app.handle_invoice_update(InvoiceUpdate {
         payment_hash: inv_d.payment_hash,
         state: LndInvoiceState::Accepted,
-        htlc_amount_msat: MilliSatoshi::new(1_000_000),
+        amt_paid_msat: MilliSatoshi::new(1_000_000),
         payment_preimage: None,
     })
     .await
-    .expect("hold + auto-settle D");
+    .expect("accepted D");
     app.handle_invoice_update(InvoiceUpdate {
         payment_hash: inv_d.payment_hash,
         state: LndInvoiceState::Settled,
-        htlc_amount_msat: MilliSatoshi::new(1_000_000),
+        amt_paid_msat: MilliSatoshi::new(1_000_000),
         payment_preimage: Some(inv_d.payment_preimage),
     })
     .await
-    .expect("idempotent settle D");
+    .expect("settled echo D is no-op");
     assert_state(&pool, &inv_d.payment_hash, "settled").await;
     assert_outbox_total(&pool, 5).await;
     assert_outbox(&pool, "lightning_htlc_held", "INCOMING_PAYMENT_PENDING", 2).await;
@@ -316,10 +319,8 @@ async fn incoming_invoice_subscription_drives_full_lifecycle() {
     )
     .await;
 
-    // The auto-settle path called LND `SettleInvoice` once for each of B
-    // and D — verifies the new wiring actually runs.
     let settle_count = lnd.settle_calls.lock().expect("settle_calls lock").len();
-    assert_eq!(settle_count, 2, "LND SettleInvoice should fire for B + D");
+    assert_eq!(settle_count, 2);
 
     // Step 5 — consumer pipeline: 5 outbox rows → 5 CalaMock entries.
     let cala = CalaMock::default();
@@ -384,7 +385,7 @@ async fn recovery_sweep_spawns_listener_for_open_and_held_only() {
     let _ = settled
         .mark_held(MilliSatoshi::new(1_000_000), Timestamp::now())
         .unwrap();
-    let _ = settled.settle(pre_settled, Timestamp::now()).unwrap();
+    let _ = settled.settle(Timestamp::now()).unwrap();
     invoices_repo.update(&mut settled).await.unwrap();
 
     let symphony: Arc<dyn SymphonyClient> = Arc::new(LightningSymphonyClient::new(""));

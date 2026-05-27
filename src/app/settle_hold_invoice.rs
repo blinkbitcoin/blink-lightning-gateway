@@ -1,29 +1,17 @@
-//! `App::settle_hold_invoice` — gateway-side HOLD-invoice settle.
-//!
-//! Story 2.4: drives LND's `Invoices/SettleInvoice` with the
-//! gateway-owned preimage hydrated off the `Invoice` aggregate, then
-//! transitions `Held → Settled` and books the `LightningInvoiceSettled`
-//! outbox row in one DB transaction.
-
-use chrono::Utc;
-use es_entity::Idempotent;
+//! Gateway-side HOLD-invoice settle. Mirrors blink-core's
+//! `update-single-pending-invoice.ts`: LookupInvoice → branch on LND
+//! truth → SettleInvoice (only when still Accepted) → commit at LND's
+//! `amt_paid_msat`. Sole writer of the Settled outbox row in the
+//! happy path; the subscription `Settled` echo is observation-only.
 
 use crate::app::helpers::is_invoice_not_found;
 use crate::app::{App, AppError};
-use crate::invoice::InvoiceError;
-use crate::outbox::NewOutboxEvent;
-use crate::primitives::{PaymentHash, Timestamp};
+use crate::invoice::event::CancelReason;
+use crate::invoice::{InvoiceError, InvoiceState};
+use crate::lnd::LndInvoiceState;
+use crate::primitives::PaymentHash;
 
 impl App {
-    /// Release the preimage on a held HODL invoice. Called automatically
-    /// by `handle_invoice_update`'s `Accepted` arm after the business
-    /// gate (stubbed in Story 2.4); Story 3.1 introduces gated callers.
-    ///
-    /// Idempotent in two layers: a `NotFound` lookup is a quiet skip
-    /// (absorbs create/listener races); `Idempotent::AlreadyApplied`
-    /// from `Invoice::settle` short-circuits before LND is called a
-    /// second time (matters when the subscription path observed the
-    /// settle first and ran the projection update).
     pub async fn settle_hold_invoice(&self, payment_hash: PaymentHash) -> Result<(), AppError> {
         let invoice = match self.invoices.find_by_payment_hash(&payment_hash).await {
             Ok(i) => i,
@@ -37,60 +25,49 @@ impl App {
             Err(e) => return Err(InvoiceError::from(e).into()),
         };
 
-        let preimage = invoice.payment_preimage;
-        let wallet_id = invoice.wallet_id;
-        let now = Timestamp::now();
-
-        // Call LND first: only after `SettleInvoice` succeeds is it safe
-        // to flip the projection to `Settled`. A wire failure here leaves
-        // the invoice in `Held`, where the subscription path will pick up
-        // the settle (if LND ultimately accepted it) or the
-        // `invoice_expiry_sweep` will eventually cancel it.
-        self.lnd.settle_invoice(preimage).await?;
-
-        let mut invoice = invoice;
-        match invoice.settle(preimage, now)? {
-            Idempotent::Executed(()) => {}
-            Idempotent::AlreadyApplied => {
-                ::tracing::info!(
-                    payment_hash = %payment_hash.to_hex(),
-                    current_state = %invoice.state,
-                    "settle_hold_invoice: settle already applied; skipping outbox publish"
-                );
-                return Ok(());
-            }
+        if !matches!(invoice.state, InvoiceState::Held) {
+            ::tracing::info!(
+                payment_hash = %payment_hash.to_hex(),
+                current_state = %invoice.state,
+                "settle_hold_invoice: not in Held state; skipping"
+            );
+            return Ok(());
         }
 
-        // `Invoice::settle` requires `Held` as source state, and `mark_held`
-        // is the only path to `Held` and unconditionally sets
-        // `held_amount_msat = Some(..)`. Reaching this line implies the
-        // field is set.
-        let amount_sat = invoice
-            .held_amount_msat
-            .expect("settle requires Held; mark_held sets held_amount_msat")
-            .whole_sat() as i64;
+        let lnd_state = self.lnd.lookup_invoice(payment_hash).await?;
 
-        let mut tx = self.pool.begin().await?;
-        self.invoices
-            .update_in_op(&mut tx, &mut invoice)
-            .await
-            .map_err(InvoiceError::from)?;
-        self.outbox
-            .publish_in_tx(
-                &mut tx,
-                NewOutboxEvent::for_lightning_invoice_settled(
-                    payment_hash.to_hex(),
-                    payment_hash.to_hex(),
-                    amount_sat,
-                    Utc::now(),
-                    serde_json::json!({
-                        "payment_preimage": preimage.to_hex(),
-                        "wallet_id": wallet_id.to_string(),
-                    }),
-                ),
-            )
-            .await?;
-        tx.commit().await?;
-        Ok(())
+        match lnd_state.state {
+            LndInvoiceState::Accepted => {
+                self.lnd.settle_invoice(invoice.payment_preimage).await?;
+                self.commit_settle(invoice, payment_hash, lnd_state.amt_paid_msat)
+                    .await
+            }
+            LndInvoiceState::Settled => {
+                // LND already settled (concurrent caller, operator action);
+                // skip the RPC, just commit the projection + outbox.
+                self.commit_settle(invoice, payment_hash, lnd_state.amt_paid_msat)
+                    .await
+            }
+            LndInvoiceState::Canceled => {
+                ::tracing::warn!(
+                    payment_hash = %payment_hash.to_hex(),
+                    "settle_hold_invoice: DB Held but LND CANCELED; committing cancel"
+                );
+                self.commit_cancel(
+                    invoice,
+                    payment_hash,
+                    CancelReason::Expired,
+                    lnd_state.amt_paid_msat,
+                )
+                .await
+            }
+            LndInvoiceState::Open => {
+                ::tracing::warn!(
+                    payment_hash = %payment_hash.to_hex(),
+                    "settle_hold_invoice: DB Held but LND OPEN; unexpected divergence"
+                );
+                Ok(())
+            }
+        }
     }
 }

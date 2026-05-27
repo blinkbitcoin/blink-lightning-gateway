@@ -201,11 +201,7 @@ impl Invoice {
 
     /// `Held → Settled`. Blink only uses hold invoice. Any other state other
     /// than Held transition to Settled is invalid
-    pub fn settle(
-        &mut self,
-        payment_preimage: Preimage,
-        settled_at: Timestamp,
-    ) -> Result<Idempotent<()>, InvoiceError> {
+    pub fn settle(&mut self, settled_at: Timestamp) -> Result<Idempotent<()>, InvoiceError> {
         idempotency_guard!(self.events.iter_all().rev(), already_applied: InvoiceEvent::Settled { .. });
         if !matches!(self.state, InvoiceState::Held) {
             return Err(InvoiceError::InvalidStateTransition {
@@ -213,10 +209,7 @@ impl Invoice {
                 attempted: "settle",
             });
         }
-        self.events.push(InvoiceEvent::Settled {
-            settled_at,
-            payment_preimage,
-        });
+        self.events.push(InvoiceEvent::Settled { settled_at });
         self.state = InvoiceState::Settled;
         Ok(Idempotent::Executed(()))
     }
@@ -474,7 +467,6 @@ mod tests {
     fn sample_settled_event() -> InvoiceEvent {
         InvoiceEvent::Settled {
             settled_at: fixed_now(),
-            payment_preimage: Preimage::from([0xee; 32]),
         }
     }
 
@@ -502,7 +494,7 @@ mod tests {
     #[test]
     fn settle_from_open_is_invalid_state_transition() {
         let mut inv = fresh_invoice();
-        match inv.settle(Preimage::from([0xee; 32]), fixed_now()) {
+        match inv.settle(fixed_now()) {
             Err(InvoiceError::InvalidStateTransition {
                 from: InvoiceState::Open,
                 attempted: "settle",
@@ -516,8 +508,7 @@ mod tests {
     fn settle_from_held_executes() {
         let mut inv = fresh_invoice();
         push_event(&mut inv, sample_held_event(), InvoiceState::Held);
-        let preimage = Preimage::from([0xee; 32]);
-        let outcome = inv.settle(preimage, fixed_now()).unwrap();
+        let outcome = inv.settle(fixed_now()).unwrap();
         assert!(matches!(outcome, Idempotent::Executed(())));
         assert_eq!(inv.state, InvoiceState::Settled);
     }
@@ -556,7 +547,7 @@ mod tests {
     fn settle_from_settled_is_idempotent() {
         let mut inv = fresh_invoice();
         push_event(&mut inv, sample_settled_event(), InvoiceState::Settled);
-        let outcome = inv.settle(Preimage::from([0xee; 32]), fixed_now()).unwrap();
+        let outcome = inv.settle(fixed_now()).unwrap();
         assert!(matches!(outcome, Idempotent::AlreadyApplied));
     }
 
@@ -588,7 +579,7 @@ mod tests {
     fn settle_from_canceled_is_invalid_state_transition() {
         let mut inv = fresh_invoice();
         push_event(&mut inv, sample_canceled_event(), InvoiceState::Canceled);
-        match inv.settle(Preimage::from([0xee; 32]), fixed_now()) {
+        match inv.settle(fixed_now()) {
             Err(InvoiceError::InvalidStateTransition {
                 attempted: "settle",
                 ..
@@ -676,7 +667,6 @@ mod tests {
                 },
                 InvoiceEvent::Settled {
                     settled_at: fixed_now(),
-                    payment_preimage: pre,
                 },
             ],
         );

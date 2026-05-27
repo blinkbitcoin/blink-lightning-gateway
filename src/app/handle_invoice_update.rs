@@ -18,7 +18,7 @@ use crate::lnd::{
     subscribe_invoice, InvoiceUpdate, LndClient, LndInvoiceState, SubscribeInvoiceExit,
 };
 use crate::outbox::NewOutboxEvent;
-use crate::primitives::{MilliSatoshi, PaymentHash, Preimage, Timestamp};
+use crate::primitives::{MilliSatoshi, PaymentHash, Timestamp};
 
 /// Coordinates per-hash `subscribe_invoice` listeners.
 #[derive(Clone)]
@@ -160,19 +160,12 @@ impl InvoiceUpdateDispatcher {
 }
 
 impl App {
-    /// Apply one update from a per-hash listener. Quiet-ignores
-    /// `NotFound` to absorb the create / listener-spawn race; dispatches
-    /// each `LndInvoiceState` to its transition helper.
+    /// Apply one update from a per-hash listener.
     ///
-    /// Concurrency: the invoice is read here, before the transition
-    /// helper opens its transaction. That read-modify-write is safe only
-    /// because the single invoice-update consumer task (`src/cli.rs`)
-    /// processes updates one at a time — two concurrent
-    /// `handle_invoice_update` calls for one `payment_hash` would compute
-    /// the same next event-log `sequence` and the second commit would
-    /// violate the `invoice_events` primary key. If that consumer is ever
-    /// sharded, the transition path needs row-level locking
-    /// (`SELECT ... FOR UPDATE`).
+    /// Concurrency: the read-modify-write here is safe only because
+    /// the single invoice-update consumer task (`src/cli.rs`) processes
+    /// updates serially — sharding it requires `SELECT ... FOR UPDATE`
+    /// to avoid duplicate `invoice_events.sequence` writes.
     pub async fn handle_invoice_update(&self, update: InvoiceUpdate) -> Result<(), AppError> {
         let invoice = match self
             .invoices
@@ -197,15 +190,12 @@ impl App {
             LndInvoiceState::Open => {
                 // No-op by design. `SubscribeSingleInvoice` emits the
                 // current state once on subscribe, then forward
-                // transitions only — and LND's invoice state machine has
-                // no `Accepted -> Open` (nor `Settled -> Open`) edge, so
-                // `Open` can only ever arrive while the row is still
-                // `Open`. There is no `Held -> Open` regression to catch.
+                // transitions only
                 ::tracing::trace!(payment_hash = %payment_hash.to_hex(), "Open state; no-op");
                 Ok(())
             }
             LndInvoiceState::Accepted => {
-                self.transition_to_held(invoice, payment_hash, update.htlc_amount_msat, now)
+                self.transition_to_held(invoice, payment_hash, update.amt_paid_msat, now)
                     .await?;
                 // STUB(story-3.1): business gate (wallet-ownership /
                 // price-lock checks) — always passes for now. Story 2.4's
@@ -223,23 +213,15 @@ impl App {
                 Ok(())
             }
             LndInvoiceState::Settled => {
-                let preimage = update.payment_preimage.ok_or_else(|| {
-                    AppError::Lnd(crate::lnd::LndError::InvalidResponse(
-                        "Settled state but payment_preimage missing".to_owned(),
-                    ))
-                })?;
-                self.transition_to_invoice_settled(invoice, payment_hash, preimage, now)
-                    .await
+                ::tracing::trace!(payment_hash = %payment_hash.to_hex(), "Settled; teardown only");
+                Ok(())
             }
             LndInvoiceState::Canceled => {
-                // Subscription path only observes LND's auto-cancel on
-                // timeout; explicit-cancel commands will fire `Manual`
-                // through a separate method.
-                self.transition_to_invoice_canceled(
+                self.commit_cancel(
                     invoice,
                     payment_hash,
                     CancelReason::Expired,
-                    now,
+                    update.amt_paid_msat,
                 )
                 .await
             }
@@ -251,11 +233,11 @@ impl App {
         &self,
         mut invoice: Invoice,
         payment_hash: PaymentHash,
-        htlc_amount_msat: MilliSatoshi,
+        amt_paid_msat: MilliSatoshi,
         now: Timestamp,
     ) -> Result<(), AppError> {
         let wallet_id = invoice.wallet_id;
-        match invoice.mark_held(htlc_amount_msat, now)? {
+        match invoice.mark_held(amt_paid_msat, now)? {
             Idempotent::Executed(()) => {}
             Idempotent::AlreadyApplied => {
                 ::tracing::info!(
@@ -267,13 +249,7 @@ impl App {
             }
         }
 
-        // The Held outbox event books a pending credit at the
-        // *parked HTLC amount*. The persisted `held_amount_msat` (set
-        // by `mark_held`) is what Settled / Canceled later echo, so the
-        // pending layer reconciles. For a fixed-amount invoice this
-        // equals `invoice.amount_msat`; for an amountless invoice it's
-        // the only correct source.
-        let amount_sat = htlc_amount_msat.whole_sat() as i64;
+        let amount_sat = amt_paid_msat.whole_sat() as i64;
         let mut tx = self.pool.begin().await?;
         self.invoices
             .update_in_op(&mut tx, &mut invoice)
@@ -288,118 +264,7 @@ impl App {
                     amount_sat,
                     Utc::now(),
                     serde_json::json!({
-                        "htlc_amount_msat": htlc_amount_msat.as_u64(),
-                        "wallet_id": wallet_id.to_string(),
-                    }),
-                ),
-            )
-            .await?;
-        tx.commit().await?;
-        Ok(())
-    }
-
-    /// `(Open|Held) → Settled` on LND `is_confirmed`.
-    async fn transition_to_invoice_settled(
-        &self,
-        mut invoice: Invoice,
-        payment_hash: PaymentHash,
-        preimage: Preimage,
-        now: Timestamp,
-    ) -> Result<(), AppError> {
-        let wallet_id = invoice.wallet_id;
-        match invoice.settle(preimage, now)? {
-            Idempotent::Executed(()) => {}
-            Idempotent::AlreadyApplied => {
-                ::tracing::info!(
-                    payment_hash = %payment_hash.to_hex(),
-                    current_state = %invoice.state,
-                    "settle ignored — duplicate replay"
-                );
-                return Ok(());
-            }
-        }
-
-        // Settled events echo the persisted `held_amount_msat` so
-        // Symphony's pending-layer release matches the credit the
-        // `LightningHtlcHeld` event booked. `Invoice::settle` requires
-        // `Held` as source state, and `mark_held` is the only path to
-        // `Held` and unconditionally sets `held_amount_msat = Some(..)`
-        // — so reaching this line implies the field is set.
-        let amount_sat = invoice
-            .held_amount_msat
-            .expect("settle requires Held; mark_held sets held_amount_msat")
-            .whole_sat() as i64;
-        let mut tx = self.pool.begin().await?;
-        self.invoices
-            .update_in_op(&mut tx, &mut invoice)
-            .await
-            .map_err(InvoiceError::from)?;
-        self.outbox
-            .publish_in_tx(
-                &mut tx,
-                NewOutboxEvent::for_lightning_invoice_settled(
-                    payment_hash.to_hex(),
-                    payment_hash.to_hex(),
-                    amount_sat,
-                    Utc::now(),
-                    serde_json::json!({
-                        "payment_preimage": preimage.to_hex(),
-                        "wallet_id": wallet_id.to_string(),
-                    }),
-                ),
-            )
-            .await?;
-        tx.commit().await?;
-        Ok(())
-    }
-
-    /// `(Open|Held) → Canceled` on LND `is_canceled`.
-    async fn transition_to_invoice_canceled(
-        &self,
-        mut invoice: Invoice,
-        payment_hash: PaymentHash,
-        reason: CancelReason,
-        now: Timestamp,
-    ) -> Result<(), AppError> {
-        let wallet_id = invoice.wallet_id;
-        // Clone so the outbox metadata can reference it after
-        // `cancel()` consumes the original.
-        let reason_for_outbox = reason.clone();
-        match invoice.cancel(reason, now)? {
-            Idempotent::Executed(()) => {}
-            Idempotent::AlreadyApplied => {
-                ::tracing::info!(
-                    payment_hash = %payment_hash.to_hex(),
-                    current_state = %invoice.state,
-                    "cancel ignored — duplicate replay"
-                );
-                return Ok(());
-            }
-        }
-
-        // Clearing the pending layer requires emitting the same
-        // amount the Held event booked. `held_amount_msat.is_some()` is
-        // exactly the "was it ever held" discriminator: for a never-held
-        // (Open → Canceled) invoice no pending entry was booked.
-        let amount_sat = invoice
-            .held_amount_msat
-            .map(|m| m.whole_sat() as i64)
-            .unwrap_or(0);
-        let mut tx = self.pool.begin().await?;
-        self.invoices
-            .update_in_op(&mut tx, &mut invoice)
-            .await
-            .map_err(InvoiceError::from)?;
-        self.outbox
-            .publish_in_tx(
-                &mut tx,
-                NewOutboxEvent::for_lightning_invoice_canceled(
-                    payment_hash.to_hex(),
-                    payment_hash.to_hex(),
-                    amount_sat,
-                    Utc::now(),
-                    serde_json::json!({
-                        "reason": reason_for_outbox.as_str(),
+                        "amt_paid_msat": amt_paid_msat.as_u64(),
                         "wallet_id": wallet_id.to_string(),
                     }),
                 ),

@@ -20,13 +20,17 @@ use sqlx::PgPool;
 
 use super::entity::Invoice;
 use super::event::InvoiceEvent;
-use crate::primitives::{InvoiceId, MilliSatoshi, PaymentHash, Timestamp, WalletId};
+use crate::primitives::{
+    BoltInvoice, InvoiceId, MilliSatoshi, PaymentHash, Preimage, Timestamp, WalletId,
+};
 
 #[derive(EsRepo, Clone)]
 #[es_repo(
     entity = "Invoice",
     columns(
         payment_hash(ty = "PaymentHash", update(persist = false)),
+        payment_preimage(ty = "Preimage", find_by = false, update(persist = false)),
+        bolt_invoice(ty = "BoltInvoice", find_by = false, update(persist = false)),
         wallet_id(ty = "WalletId", list_for, update(persist = false)),
         amount_msat(ty = "Option<MilliSatoshi>", find_by = false, update(persist = false),),
         expiry_at(ty = "Timestamp", find_by = false, update(persist = false)),

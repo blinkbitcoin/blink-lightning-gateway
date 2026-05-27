@@ -60,9 +60,7 @@ pub enum LndInvoiceState {
 pub struct InvoiceUpdate {
     pub payment_hash: PaymentHash,
     pub state: LndInvoiceState,
-    /// Sum of `amt_msat` over `Accepted` HTLCs — the parked amount.
-    pub htlc_amount_msat: MilliSatoshi,
-    /// Present iff `state == Settled`.
+    pub amt_paid_msat: MilliSatoshi,
     pub payment_preimage: Option<Preimage>,
 }
 
@@ -212,14 +210,18 @@ pub(crate) fn lnd_invoice_to_update(invoice: lnrpc::Invoice) -> Result<InvoiceUp
 
     let state = map_invoice_state(invoice.state)?;
 
-    let htlc_amount_msat = sum_accepted_htlcs(&invoice.htlcs)?;
+    let amt_paid_msat = u64::try_from(invoice.amt_paid_msat)
+        .map(MilliSatoshi::new)
+        .map_err(|_| {
+            LndError::InvalidResponse(format!("amt_paid_msat negative: {}", invoice.amt_paid_msat))
+        })?;
 
     let payment_preimage = parse_preimage(&invoice.r_preimage, &payment_hash);
 
     Ok(InvoiceUpdate {
         payment_hash,
         state,
-        htlc_amount_msat,
+        amt_paid_msat,
         payment_preimage,
     })
 }
@@ -234,17 +236,6 @@ fn map_invoice_state(value: i32) -> Result<LndInvoiceState, LndError> {
         S::Settled => LndInvoiceState::Settled,
         S::Canceled => LndInvoiceState::Canceled,
     })
-}
-
-fn sum_accepted_htlcs(htlcs: &[lnrpc::InvoiceHtlc]) -> Result<MilliSatoshi, LndError> {
-    let accepted = lnrpc::InvoiceHtlcState::Accepted as i32;
-    let total: u64 = htlcs
-        .iter()
-        .filter(|h| h.state == accepted)
-        .map(|h| h.amt_msat)
-        .try_fold(0u64, |acc, amt| acc.checked_add(amt))
-        .ok_or_else(|| LndError::InvalidResponse("htlc amt_msat sum overflowed u64".to_owned()))?;
-    Ok(MilliSatoshi::new(total))
 }
 
 /// `r_preimage` is 32 bytes when settled, empty otherwise. Any other
@@ -301,22 +292,23 @@ mod tests {
             r_hash: vec![0xab; 32],
             state: state as i32,
             r_preimage,
-            htlcs: vec![lnrpc::InvoiceHtlc {
-                amt_msat: 1_000_000,
-                state: lnrpc::InvoiceHtlcState::Accepted as i32,
-                ..Default::default()
-            }],
+            amt_paid_msat: 1_000_000,
             ..Default::default()
         }
     }
 
     #[test]
-    fn lnd_invoice_to_update_settled_carries_preimage() {
+    fn lnd_invoice_to_update_settled_carries_preimage_and_amt_paid() {
+        // Guards the SETTLED-state read path. Under the prior
+        // `sum_accepted_htlcs` reduction this would have returned 0
+        // for any real LND `Settled` payload — the parked HTLCs have
+        // transitioned to `Settled` HTLC state and were filtered out.
+        // Reading `amt_paid_msat` directly is robust.
         let inv = invoice_with(lnrpc::invoice::InvoiceState::Settled, vec![0xee; 32]);
         let update = lnd_invoice_to_update(inv).unwrap();
         assert_eq!(update.state, LndInvoiceState::Settled);
         assert_eq!(update.payment_preimage, Some(Preimage::from([0xee; 32])));
-        assert_eq!(update.htlc_amount_msat, MilliSatoshi::new(1_000_000));
+        assert_eq!(update.amt_paid_msat, MilliSatoshi::new(1_000_000));
     }
 
     #[test]
@@ -326,7 +318,7 @@ mod tests {
         let update = lnd_invoice_to_update(inv).unwrap();
         assert_eq!(update.state, LndInvoiceState::Accepted);
         assert_eq!(update.payment_preimage, None);
-        assert_eq!(update.htlc_amount_msat, MilliSatoshi::new(1_000_000));
+        assert_eq!(update.amt_paid_msat, MilliSatoshi::new(1_000_000));
     }
 
     #[test]
@@ -338,7 +330,7 @@ mod tests {
         };
         let update = lnd_invoice_to_update(inv).unwrap();
         assert_eq!(update.state, LndInvoiceState::Open);
-        assert_eq!(update.htlc_amount_msat, MilliSatoshi::ZERO);
+        assert_eq!(update.amt_paid_msat, MilliSatoshi::ZERO);
     }
 
     #[test]
@@ -367,55 +359,18 @@ mod tests {
     }
 
     #[test]
-    fn lnd_invoice_to_update_filters_non_accepted_htlcs_from_sum() {
-        // A Settled invoice may still carry one ACCEPTED HTLC alongside
-        // a SETTLED one; only the ACCEPTED amount contributes to
-        // `htlc_amount_msat`.
+    fn lnd_invoice_to_update_negative_amt_paid_msat_errs() {
+        // LND's `amt_paid_msat` is `i64` on the wire but conceptually
+        // non-negative. A negative value would silently reinterpret as
+        // a huge u64 under `as` casting; `try_from` surfaces it.
         let inv = lnrpc::Invoice {
             r_hash: vec![0xab; 32],
             state: lnrpc::invoice::InvoiceState::Settled as i32,
-            r_preimage: vec![0xee; 32],
-            htlcs: vec![
-                lnrpc::InvoiceHtlc {
-                    amt_msat: 500_000,
-                    state: lnrpc::InvoiceHtlcState::Accepted as i32,
-                    ..Default::default()
-                },
-                lnrpc::InvoiceHtlc {
-                    amt_msat: 700_000,
-                    state: lnrpc::InvoiceHtlcState::Settled as i32,
-                    ..Default::default()
-                },
-            ],
-            ..Default::default()
-        };
-        let update = lnd_invoice_to_update(inv).unwrap();
-        assert_eq!(update.htlc_amount_msat, MilliSatoshi::new(500_000));
-    }
-
-    #[test]
-    fn lnd_invoice_to_update_htlc_sum_overflow_errs() {
-        // Two ACCEPTED HTLCs whose amt_msat sum exceeds u64::MAX must
-        // surface as InvalidResponse — not wrap or panic.
-        let inv = lnrpc::Invoice {
-            r_hash: vec![0xab; 32],
-            state: lnrpc::invoice::InvoiceState::Accepted as i32,
-            htlcs: vec![
-                lnrpc::InvoiceHtlc {
-                    amt_msat: u64::MAX,
-                    state: lnrpc::InvoiceHtlcState::Accepted as i32,
-                    ..Default::default()
-                },
-                lnrpc::InvoiceHtlc {
-                    amt_msat: 1,
-                    state: lnrpc::InvoiceHtlcState::Accepted as i32,
-                    ..Default::default()
-                },
-            ],
+            amt_paid_msat: -1,
             ..Default::default()
         };
         match lnd_invoice_to_update(inv) {
-            Err(LndError::InvalidResponse(msg)) => assert!(msg.contains("overflow")),
+            Err(LndError::InvalidResponse(msg)) => assert!(msg.contains("negative")),
             other => panic!("expected InvalidResponse, got {other:?}"),
         }
     }

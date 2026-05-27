@@ -1,13 +1,15 @@
 -- Invoice aggregate: projection table + event-sourcing event table.
 
 CREATE TABLE invoices (
-    id              UUID         PRIMARY KEY,
-    payment_hash    BYTEA        NOT NULL UNIQUE,
-    wallet_id       UUID         NOT NULL,
-    amount_msat     BIGINT,
-    expiry_at       TIMESTAMPTZ  NOT NULL,
-    state           TEXT         NOT NULL,
-    created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+    id               UUID         PRIMARY KEY,
+    payment_hash     BYTEA        NOT NULL UNIQUE,
+    payment_preimage BYTEA        NOT NULL,
+    bolt_invoice     TEXT         NOT NULL,
+    wallet_id        UUID         NOT NULL,
+    amount_msat      BIGINT,
+    expiry_at        TIMESTAMPTZ  NOT NULL,
+    state            TEXT         NOT NULL,
+    created_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX idx_invoices_wallet_id ON invoices(wallet_id);
