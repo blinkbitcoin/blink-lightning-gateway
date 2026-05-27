@@ -22,7 +22,6 @@ impl App {
         amt_paid_msat: MilliSatoshi,
     ) -> Result<(), AppError> {
         let wallet_id = invoice.wallet_id;
-        let payment_preimage = invoice.payment_preimage;
         let now = Timestamp::now();
         match invoice.settle(now)? {
             Idempotent::Executed(()) => {}
@@ -57,7 +56,6 @@ impl App {
                     amount_sat,
                     Utc::now(),
                     serde_json::json!({
-                        "payment_preimage": payment_preimage.to_hex(),
                         "wallet_id": wallet_id.to_string(),
                         "amt_paid_msat": amt_paid_msat.as_u64(),
                         "held_amount_msat": held_amount_msat,

@@ -228,7 +228,6 @@ impl App {
         }
     }
 
-    /// `Open → Held` on LND `Accepted`.
     async fn transition_to_held(
         &self,
         mut invoice: Invoice,
