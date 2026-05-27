@@ -199,8 +199,10 @@ impl Invoice {
         Ok(Idempotent::Executed(()))
     }
 
-    /// `Held → Settled`. Blink only uses hold invoice. Any other state other
-    /// than Held transition to Settled is invalid
+    /// `Held → Settled`. Blink only issues HODL invoices, so settle is
+    /// only valid from Held. A duplicate Settled event short-circuits as
+    /// `Idempotent::AlreadyApplied`, any other source state is
+    /// `InvalidStateTransition`.
     pub fn settle(&mut self, settled_at: Timestamp) -> Result<Idempotent<()>, InvoiceError> {
         idempotency_guard!(self.events.iter_all().rev(), already_applied: InvoiceEvent::Settled { .. });
         if !matches!(self.state, InvoiceState::Held) {

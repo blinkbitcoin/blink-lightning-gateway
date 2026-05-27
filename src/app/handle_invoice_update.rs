@@ -189,8 +189,9 @@ impl App {
         match update.state {
             LndInvoiceState::Open => {
                 // No-op by design. `SubscribeSingleInvoice` emits the
-                // current state once on subscribe, then forward
-                // transitions only
+                // current state once on subscribe, then forwards
+                // transitions only; an `Open` echo means nothing has
+                // happened on this hash yet.
                 ::tracing::trace!(payment_hash = %payment_hash.to_hex(), "Open state; no-op");
                 Ok(())
             }
@@ -213,7 +214,15 @@ impl App {
                 Ok(())
             }
             LndInvoiceState::Settled => {
-                ::tracing::trace!(payment_hash = %payment_hash.to_hex(), "Settled; teardown only");
+                // The auto-settle path (Accepted arm above) or the reconcile
+                // sweep already wrote the Settled outbox row; this wire echo
+                // is observation-only. `SubscribeSingleInvoice` self-terminates
+                // server-side on Settled — the per-hash listener task exits and
+                // the dispatcher releases its slot.
+                ::tracing::trace!(
+                    payment_hash = %payment_hash.to_hex(),
+                    "Settled wire echo; auto-settle path already committed"
+                );
                 Ok(())
             }
             LndInvoiceState::Canceled => {
