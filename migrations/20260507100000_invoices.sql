@@ -9,10 +9,12 @@ CREATE TABLE invoices (
     amount_msat      BIGINT,
     expiry_at        TIMESTAMPTZ  NOT NULL,
     state            TEXT         NOT NULL,
+    external_id      TEXT         NOT NULL,
     created_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX idx_invoices_wallet_id ON invoices(wallet_id);
+CREATE UNIQUE INDEX uq_invoices_wallet_id_external_id ON invoices(wallet_id, external_id);
 
 -- Columns required by es-entity 0.9.5's `EsRepo` derive.
 CREATE TABLE invoice_events (
