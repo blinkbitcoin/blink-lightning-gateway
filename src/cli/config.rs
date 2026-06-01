@@ -12,6 +12,7 @@ use crate::lnd::LndConfig;
 use crate::server::config::{GrpcServerConfig, HealthServerConfig, SubgraphServerConfig};
 use crate::symphony::SymphonyConfig;
 use crate::tracing::TracingConfig;
+use crate::wallet::WalletOwnershipConfig;
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -25,6 +26,8 @@ pub struct Config {
     pub health_server: HealthServerConfig,
     #[serde(default)]
     pub symphony: SymphonyConfig,
+    #[serde(default)]
+    pub wallet_ownership: WalletOwnershipConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lnd: Option<LndConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]

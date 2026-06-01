@@ -10,6 +10,7 @@ use crate::lnd::LndError;
 use crate::payment::repo::{PaymentFindError, PaymentModifyError};
 use crate::payment::{FailureReason, Hop};
 use crate::primitives::WalletId;
+use crate::wallet::CallerAuth;
 
 /// Detect concurrent-modification on a Payment modify. Used by the sync
 /// `send_payment` path to retry once when the subscription handler beats
@@ -52,12 +53,15 @@ pub(crate) fn lnd_error_to_failure_reason(err: &LndError) -> FailureReason {
 }
 
 impl App {
-    /// STUB(story-3.1): replace with Apollo Router entity sub-query + TTL
-    /// cache.
+    /// Cross-subgraph wallet-ownership gate
     pub(crate) async fn check_wallet_ownership(
         &self,
-        _wallet_id: &WalletId,
+        caller: &CallerAuth,
+        wallet_id: &WalletId,
     ) -> Result<(), AppError> {
-        Ok(())
+        self.ownership
+            .check(caller, wallet_id)
+            .await
+            .map_err(|e| AppError::WalletOwnership(e.to_string()))
     }
 }

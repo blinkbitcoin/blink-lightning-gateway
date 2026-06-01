@@ -22,6 +22,9 @@ use blink_lightning_gateway::lnd::{
 use blink_lightning_gateway::outbox::EventPublisher;
 use blink_lightning_gateway::primitives::{PaymentHash, Preimage};
 use blink_lightning_gateway::symphony::{LightningSymphonyClient, SymphonyClient};
+use blink_lightning_gateway::wallet::{
+    ApolloRouterOwnershipChecker, WalletOwnershipChecker, WalletOwnershipConfig,
+};
 
 struct StubLnd;
 
@@ -68,12 +71,16 @@ async fn main() {
         .expect("connect_lazy");
 
     let outbox = EventPublisher::new(&pool);
-    let symphony: Arc<dyn SymphonyClient> = Arc::new(LightningSymphonyClient::new(""));
+    let symphony: Arc<dyn SymphonyClient> = Arc::new(LightningSymphonyClient::boot_stub());
+    let ownership: Arc<dyn WalletOwnershipChecker> = Arc::new(ApolloRouterOwnershipChecker::new(
+        &WalletOwnershipConfig::default(),
+    ));
     let app = App::new(
         pool,
         Arc::new(StubLnd),
         outbox,
         symphony,
+        ownership,
         InvoiceUpdateDispatcher::for_test(),
     );
     let schema = build_schema(app);

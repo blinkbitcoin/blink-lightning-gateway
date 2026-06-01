@@ -4,7 +4,8 @@
 //! here.
 
 use blink_lightning_gateway::invoice::entity::{InvoiceState, NewInvoice};
-use blink_lightning_gateway::invoice::Invoices;
+use blink_lightning_gateway::invoice::repo::InvoiceCreateError;
+use blink_lightning_gateway::invoice::{InvoiceError, Invoices};
 use blink_lightning_gateway::primitives::{
     BoltInvoice, MilliSatoshi, PaymentHash, Preimage, Timestamp, WalletId,
 };
@@ -21,6 +22,7 @@ fn ok_new_invoice() -> NewInvoice {
         Some(MilliSatoshi::new(1_000_000)),
         3600,
         BoltInvoice::new("lnbc1u1pj..."),
+        "ext-id".to_owned(),
         Timestamp::now(),
     )
     .expect("valid")
@@ -44,6 +46,53 @@ async fn create_then_find_by_payment_hash() {
         .expect("find");
     assert_eq!(found.id, expected_id);
     assert_eq!(found.amount_msat, Some(MilliSatoshi::new(1_000_000)));
+}
+
+#[tokio::test]
+async fn duplicate_payment_hash_does_not_masquerade_as_external_id() {
+    // Guards the `From<InvoiceCreateError>` discrimination (error.rs): only a
+    // (wallet_id, external_id) unique violation lifts into
+    // `DuplicateExternalId`. A *different* unique violation — here a duplicate
+    // payment_hash — must fall through to `InvoiceCreate`, never get
+    // mislabeled. Distinct wallets + external_ids isolate the collision to
+    // payment_hash alone.
+    let db = TestDatabase::new().await.expect("test db");
+    let pool = db.pool.clone();
+    let invoices = Invoices::new(&pool);
+
+    let preimage = Preimage::from([0x7c; 32]);
+    let payment_hash = preimage.payment_hash();
+    let invoice = |external_id: &str| {
+        NewInvoice::try_new(
+            payment_hash,
+            preimage,
+            WalletId::from(Uuid::now_v7()),
+            Some(MilliSatoshi::new(1_000_000)),
+            3600,
+            BoltInvoice::new("lnbc1u1pj..."),
+            external_id.to_owned(),
+            Timestamp::now(),
+        )
+        .expect("valid")
+    };
+
+    invoices
+        .create(invoice("ext-a"))
+        .await
+        .expect("first create");
+
+    let err = invoices
+        .create(invoice("ext-b"))
+        .await
+        .expect_err("duplicate payment_hash must fail");
+    let mapped = InvoiceError::from(err);
+    assert!(
+        matches!(
+            mapped,
+            InvoiceError::InvoiceCreate(InvoiceCreateError::ConstraintViolation { .. })
+        ),
+        "a non-external_id unique violation must stay InvoiceCreate, got {mapped:?}"
+    );
 }
 
 #[tokio::test]
@@ -102,6 +151,7 @@ async fn list_open_invoices_returns_open_and_held_only() {
                 Some(MilliSatoshi::new(1_000_000)),
                 3600,
                 BoltInvoice::new("lnbc1u1pj..."),
+                "ext-id".to_owned(),
                 Timestamp::now(),
             )
             .unwrap(),
@@ -119,6 +169,7 @@ async fn list_open_invoices_returns_open_and_held_only() {
                 Some(MilliSatoshi::new(2_000_000)),
                 3600,
                 BoltInvoice::new("lnbc2u1pj..."),
+                "ext-id".to_owned(),
                 Timestamp::now(),
             )
             .unwrap(),
@@ -140,6 +191,7 @@ async fn list_open_invoices_returns_open_and_held_only() {
                 Some(MilliSatoshi::new(3_000_000)),
                 3600,
                 BoltInvoice::new("lnbc3u1pj..."),
+                "ext-id".to_owned(),
                 Timestamp::now(),
             )
             .unwrap(),
@@ -189,6 +241,7 @@ async fn invoice_settled_event_hydrates_payment_preimage() {
         Some(MilliSatoshi::new(1_000_000)),
         3600,
         BoltInvoice::new("lnbc1u1pj..."),
+        "ext-id".to_owned(),
         Timestamp::now(),
     )
     .unwrap();

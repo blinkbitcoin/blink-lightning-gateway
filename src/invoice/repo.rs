@@ -34,6 +34,15 @@ use crate::primitives::{
         wallet_id(ty = "WalletId", list_for, update(persist = false)),
         amount_msat(ty = "Option<MilliSatoshi>", find_by = false, update(persist = false),),
         expiry_at(ty = "Timestamp", find_by = false, update(persist = false)),
+        // `constraint = "..."` maps the named composite unique index to
+        // `InvoiceColumn::ExternalId` so a 23505 lifts into
+        // `InvoiceError::DuplicateExternalId`.
+        external_id(
+            ty = "String",
+            find_by = false,
+            constraint = "uq_invoices_wallet_id_external_id",
+            update(persist = false),
+        ),
         state(
             ty = "String",
             find_by = false,

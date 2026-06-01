@@ -11,7 +11,7 @@
 db:
   pool_size: 20
 
-# GraphQL subgraph server (federation v2).
+# GraphQL subgraph server (federation v2). `jwks_url` validates caller JWTs.
 subgraph_server:
   port: 6691
   jwks_url: "http://localhost:4456/.well-known/jwks.json"
@@ -31,9 +31,15 @@ grpc_server:
 health_server:
   port: 8080
 
-# Symphony adapter
+# Symphony adapter. `grpc_endpoint` is required — empty fails boot (fail-closed).
 symphony:
   grpc_endpoint: "http://symphony:6580"
+
+# Wallet-ownership check (ADR-0006): membership query through Apollo Router
+# with the caller JWT. Empty `router_endpoint` → fail-closed (denies all).
+wallet_ownership:
+  router_endpoint: "http://localhost:4455/graphql"
+#  cache_secs: 60   # per-caller membership cache TTL (default 60)
 
 # LND adapter. The default points at `tilt up`'s `lnd1` from
 # `vendor/blink-quickstart`. Remove this block (or set it to a path

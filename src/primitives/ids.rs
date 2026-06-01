@@ -8,8 +8,6 @@
 //! gateway is the authority that creates those ids.
 //!
 //! `WalletId` is a *foreign reference* owned by blink-core.
-//!
-//! `HtlcId` (Slice 4, Story 3.1) lands alongside its aggregate.
 
 use std::fmt;
 use std::str::FromStr;

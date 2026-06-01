@@ -81,6 +81,7 @@ pub struct NewInvoice {
     pub amount_msat: Option<MilliSatoshi>,
     pub expiry_at: Timestamp,
     pub bolt_invoice: BoltInvoice,
+    pub external_id: String,
     pub created_at: Timestamp,
 }
 
@@ -91,6 +92,7 @@ impl NewInvoice {
     /// out-of-range `expiry_seconds` (outside 60s..=24h) to the 4-hour
     /// default. `memo` isn't stored — it's already encoded in
     /// `bolt_invoice` (BOLT11's `d` field).
+    #[allow(clippy::too_many_arguments)]
     pub fn try_new(
         payment_hash: PaymentHash,
         payment_preimage: Preimage,
@@ -98,6 +100,7 @@ impl NewInvoice {
         amount_msat: Option<MilliSatoshi>,
         expiry_seconds: u32,
         bolt_invoice: BoltInvoice,
+        external_id: String,
         now: Timestamp,
     ) -> Result<Self, InvoiceError> {
         if matches!(amount_msat, Some(a) if a.as_u64() == 0) {
@@ -120,6 +123,7 @@ impl NewInvoice {
             amount_msat,
             expiry_at,
             bolt_invoice,
+            external_id,
             created_at: now,
         })
     }
@@ -141,6 +145,7 @@ impl IntoEvents<InvoiceEvent> for NewInvoice {
                 amount_msat: self.amount_msat,
                 expiry_at: self.expiry_at,
                 bolt_invoice: self.bolt_invoice,
+                external_id: self.external_id,
                 created_at: self.created_at,
             }],
         )
@@ -159,6 +164,7 @@ pub struct Invoice {
     pub amount_msat: Option<MilliSatoshi>,
     pub expiry_at: Timestamp,
     pub bolt_invoice: BoltInvoice,
+    pub external_id: String,
     #[builder(default = "InvoiceState::Open")]
     pub state: InvoiceState,
     pub created_at: Timestamp,
@@ -254,6 +260,7 @@ impl fmt::Debug for Invoice {
             .field("amount_msat", &self.amount_msat)
             .field("expiry_at", &self.expiry_at)
             .field("bolt_invoice", &self.bolt_invoice)
+            .field("external_id", &self.external_id)
             .field("state", &self.state)
             .field("created_at", &self.created_at)
             .field("held_amount_msat", &self.held_amount_msat)
@@ -275,6 +282,7 @@ impl TryFromEvents<InvoiceEvent> for Invoice {
                     amount_msat,
                     expiry_at,
                     bolt_invoice,
+                    external_id,
                     created_at,
                 } => {
                     builder = builder
@@ -284,6 +292,7 @@ impl TryFromEvents<InvoiceEvent> for Invoice {
                         .amount_msat(*amount_msat)
                         .expiry_at(*expiry_at)
                         .bolt_invoice(bolt_invoice.clone())
+                        .external_id(external_id.clone())
                         .created_at(*created_at);
                 }
                 InvoiceEvent::HtlcHeld {
@@ -345,7 +354,8 @@ mod tests {
     fn try_new_happy_path_constructs_new_invoice() {
         let (h, pre, w, a, e, b) = ok_args();
         let now = fixed_now();
-        let new = NewInvoice::try_new(h, pre, w, a, e, b, now).expect("happy path");
+        let new =
+            NewInvoice::try_new(h, pre, w, a, e, b, "ext-id".to_owned(), now).expect("happy path");
         assert_eq!(new.amount_msat, Some(MilliSatoshi::new(1_000_000)));
         assert_eq!(new.payment_preimage, pre);
         assert_eq!(new.created_at, now);
@@ -360,7 +370,8 @@ mod tests {
         // time. AC4 aggregate-interface prep for Story 5.1's
         // `lnNoAmountInvoiceCreate` entrypoint.
         let (h, pre, w, _, e, b) = ok_args();
-        let new = NewInvoice::try_new(h, pre, w, None, e, b, fixed_now()).unwrap();
+        let new =
+            NewInvoice::try_new(h, pre, w, None, e, b, "ext-id".to_owned(), fixed_now()).unwrap();
         assert_eq!(new.amount_msat, None);
     }
 
@@ -369,8 +380,8 @@ mod tests {
         let (h, pre, w, a, _, b) = ok_args();
         let now = fixed_now();
         let low_expiry = BTC_INVOICE_MIN_SECONDS - 1;
-        let new =
-            NewInvoice::try_new(h, pre, w, a, low_expiry, b, now).expect("coerced, not rejected");
+        let new = NewInvoice::try_new(h, pre, w, a, low_expiry, b, "ext-id".to_owned(), now)
+            .expect("coerced, not rejected");
         let expected_expiry = Timestamp::from(
             now.into_inner() + chrono::Duration::seconds(i64::from(BTC_INVOICE_DEFAULT_SECONDS)),
         );
@@ -382,8 +393,8 @@ mod tests {
         let (h, pre, w, a, _, b) = ok_args();
         let now = fixed_now();
         let high_expiry = BTC_INVOICE_MAX_SECONDS + 1;
-        let new =
-            NewInvoice::try_new(h, pre, w, a, high_expiry, b, now).expect("coerced, not rejected");
+        let new = NewInvoice::try_new(h, pre, w, a, high_expiry, b, "ext-id".to_owned(), now)
+            .expect("coerced, not rejected");
         let expected_expiry = Timestamp::from(
             now.into_inner() + chrono::Duration::seconds(i64::from(BTC_INVOICE_DEFAULT_SECONDS)),
         );
@@ -393,28 +404,57 @@ mod tests {
     #[test]
     fn try_new_rejects_some_zero_amount() {
         let (h, pre, w, _, e, b) = ok_args();
-        let err = NewInvoice::try_new(h, pre, w, Some(MilliSatoshi::ZERO), e, b, fixed_now())
-            .unwrap_err();
+        let err = NewInvoice::try_new(
+            h,
+            pre,
+            w,
+            Some(MilliSatoshi::ZERO),
+            e,
+            b,
+            "ext-id".to_owned(),
+            fixed_now(),
+        )
+        .unwrap_err();
         assert!(matches!(err, InvoiceError::InvalidAmount));
     }
 
     #[test]
     fn try_new_accepts_minimum_expiry() {
         let (h, pre, w, a, _, b) = ok_args();
-        assert!(NewInvoice::try_new(h, pre, w, a, BTC_INVOICE_MIN_SECONDS, b, fixed_now()).is_ok());
+        assert!(NewInvoice::try_new(
+            h,
+            pre,
+            w,
+            a,
+            BTC_INVOICE_MIN_SECONDS,
+            b,
+            "ext-id".to_owned(),
+            fixed_now()
+        )
+        .is_ok());
     }
 
     #[test]
     fn try_new_accepts_maximum_expiry() {
         let (h, pre, w, a, _, b) = ok_args();
-        assert!(NewInvoice::try_new(h, pre, w, a, BTC_INVOICE_MAX_SECONDS, b, fixed_now()).is_ok());
+        assert!(NewInvoice::try_new(
+            h,
+            pre,
+            w,
+            a,
+            BTC_INVOICE_MAX_SECONDS,
+            b,
+            "ext-id".to_owned(),
+            fixed_now()
+        )
+        .is_ok());
     }
 
     #[test]
     fn try_from_events_reconstructs_open_invoice() {
         let (h, pre, w, a, e, b) = ok_args();
         let now = fixed_now();
-        let new = NewInvoice::try_new(h, pre, w, a, e, b, now).unwrap();
+        let new = NewInvoice::try_new(h, pre, w, a, e, b, "ext-id".to_owned(), now).unwrap();
         let id = new.id;
         let entity_events = new.into_events();
         let invoice = Invoice::try_from_events(entity_events).expect("hydrate");
@@ -448,7 +488,8 @@ mod tests {
 
     fn fresh_invoice() -> Invoice {
         let (h, pre, w, a, e, b) = ok_args();
-        let new = NewInvoice::try_new(h, pre, w, a, e, b, fixed_now()).unwrap();
+        let new =
+            NewInvoice::try_new(h, pre, w, a, e, b, "ext-id".to_owned(), fixed_now()).unwrap();
         Invoice::try_from_events(new.into_events()).unwrap()
     }
 
@@ -614,7 +655,8 @@ mod tests {
         // across a process restart. Catches a regression where the
         // builder fold omits the field.
         let (h, pre, w, a, e, b) = ok_args();
-        let new = NewInvoice::try_new(h, pre, w, a, e, b, fixed_now()).unwrap();
+        let new =
+            NewInvoice::try_new(h, pre, w, a, e, b, "ext-id".to_owned(), fixed_now()).unwrap();
         let id = new.id;
         let htlc = MilliSatoshi::new(420_000);
         let held_at = fixed_now();
@@ -630,6 +672,7 @@ mod tests {
                         held_at.into_inner() + chrono::Duration::seconds(i64::from(e)),
                     ),
                     bolt_invoice: BoltInvoice::new("lnbc1u1pj..."),
+                    external_id: "ext-id".to_owned(),
                     created_at: fixed_now(),
                 },
                 InvoiceEvent::HtlcHeld {
@@ -647,7 +690,8 @@ mod tests {
     fn try_from_events_reconstructs_settled_after_held_invoice() {
         // Fold over Created → HtlcHeld → Settled.
         let (h, pre, w, a, e, b) = ok_args();
-        let new = NewInvoice::try_new(h, pre, w, a, e, b, fixed_now()).unwrap();
+        let new =
+            NewInvoice::try_new(h, pre, w, a, e, b, "ext-id".to_owned(), fixed_now()).unwrap();
         let id = new.id;
         let events = EntityEvents::init(
             id,
@@ -661,6 +705,7 @@ mod tests {
                         fixed_now().into_inner() + chrono::Duration::seconds(i64::from(e)),
                     ),
                     bolt_invoice: BoltInvoice::new("lnbc1u1pj..."),
+                    external_id: "ext-id".to_owned(),
                     created_at: fixed_now(),
                 },
                 InvoiceEvent::HtlcHeld {
@@ -680,7 +725,8 @@ mod tests {
     #[test]
     fn try_from_events_reconstructs_canceled_invoice() {
         let (h, pre, w, a, e, b) = ok_args();
-        let new = NewInvoice::try_new(h, pre, w, a, e, b, fixed_now()).unwrap();
+        let new =
+            NewInvoice::try_new(h, pre, w, a, e, b, "ext-id".to_owned(), fixed_now()).unwrap();
         let id = new.id;
         let events = EntityEvents::init(
             id,
@@ -694,6 +740,7 @@ mod tests {
                         fixed_now().into_inner() + chrono::Duration::seconds(i64::from(e)),
                     ),
                     bolt_invoice: BoltInvoice::new("lnbc1u1pj..."),
+                    external_id: "ext-id".to_owned(),
                     created_at: fixed_now(),
                 },
                 InvoiceEvent::Canceled {

@@ -8,7 +8,9 @@
 use thiserror::Error;
 
 use super::entity::InvoiceState;
-use super::repo::{InvoiceCreateError, InvoiceFindError, InvoiceModifyError, InvoiceQueryError};
+use super::repo::{
+    InvoiceColumn, InvoiceCreateError, InvoiceFindError, InvoiceModifyError, InvoiceQueryError,
+};
 use crate::primitives::PaymentHash;
 
 #[derive(Debug, Error)]
@@ -25,8 +27,14 @@ pub enum InvoiceError {
         attempted: &'static str,
     },
 
+    #[error("an invoice already exists for this external_id on the wallet")]
+    DuplicateExternalId { detail: String },
+
+    #[error("external_id {0:?} must match /^[a-z0-9_-]{{1,100}}$/")]
+    InvalidExternalId(String),
+
     #[error(transparent)]
-    InvoiceCreate(#[from] InvoiceCreateError),
+    InvoiceCreate(InvoiceCreateError),
     #[error(transparent)]
     InvoiceModify(#[from] InvoiceModifyError),
     #[error(transparent)]
@@ -36,4 +44,19 @@ pub enum InvoiceError {
 
     #[error(transparent)]
     Sqlx(#[from] sqlx::Error),
+}
+
+impl From<InvoiceCreateError> for InvoiceError {
+    fn from(error: InvoiceCreateError) -> Self {
+        match error {
+            InvoiceCreateError::ConstraintViolation {
+                column: Some(InvoiceColumn::ExternalId),
+                value,
+                ..
+            } => Self::DuplicateExternalId {
+                detail: value.unwrap_or_default(),
+            },
+            other => Self::InvoiceCreate(other),
+        }
+    }
 }

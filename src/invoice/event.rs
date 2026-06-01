@@ -51,6 +51,7 @@ pub enum InvoiceEvent {
         amount_msat: Option<MilliSatoshi>,
         expiry_at: Timestamp,
         bolt_invoice: BoltInvoice,
+        external_id: String,
         created_at: Timestamp,
     },
     HtlcHeld {
