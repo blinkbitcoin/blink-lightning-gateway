@@ -1,22 +1,10 @@
 //! blink-lightning-gateway library crate.
-//!
-//! Bria-style flat per-bounded-context layout. See ADR #1 (filed by Story 1.3
-//! at `_bmad-output/decisions/0001-ddd-bria-pattern-fidelity.md`) for the full
-//! rationale. Module bodies land in their respective slice stories
-//! (Epic 2 onwards); this scaffold only declares them.
 
-// Bounded contexts (event-sourced via es-entity)
-//
-// `profile/` was REJECTED per architecture.md L183 (gaps table) — no tenant
-// model in C2-Discovery scope; Profile would land if/when external trust
-// boundaries arrive (C2-Production or beyond). The architecture's L824 tree
-// listing was stale; the rejection wins.
-pub mod htlc;
 pub mod invoice;
 pub mod payment;
 
-// Domain modules shared by every bounded context (invoice, payment, htlc
-// all use these — value objects and fee math).
+// Domain modules shared by every bounded context (invoice, payment both use
+// these — value objects and fee math).
 pub mod fees;
 pub mod primitives;
 
@@ -29,6 +17,10 @@ pub mod outbox;
 // directly per ADR #2)
 pub mod lnd;
 pub mod symphony;
+
+// Cross-subgraph wallet-ownership validation .Not a local Wallet
+// projection — the gateway does not own the Wallet aggregate.
+pub mod wallet;
 
 // Inbound API
 pub mod api;
@@ -54,4 +46,8 @@ pub mod tracing;
 // match the import shape in blink-card.
 pub mod lightning_payment_gateway {
     tonic::include_proto!("lightning_payment_gateway");
+}
+
+pub mod symphony_proto {
+    tonic::include_proto!("symphony");
 }

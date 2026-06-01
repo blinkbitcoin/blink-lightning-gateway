@@ -22,6 +22,7 @@ impl App {
         amt_paid_msat: MilliSatoshi,
     ) -> Result<(), AppError> {
         let wallet_id = invoice.wallet_id;
+        let external_id = invoice.external_id.clone();
         let now = Timestamp::now();
         match invoice.settle(now)? {
             Idempotent::Executed(()) => {}
@@ -59,6 +60,7 @@ impl App {
                         "wallet_id": wallet_id.to_string(),
                         "amt_paid_msat": amt_paid_msat.as_u64(),
                         "held_amount_msat": held_amount_msat,
+                        "external_id": external_id,
                     }),
                 ),
             )

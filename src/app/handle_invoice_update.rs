@@ -198,11 +198,9 @@ impl App {
             LndInvoiceState::Accepted => {
                 self.transition_to_held(invoice, payment_hash, update.amt_paid_msat, now)
                     .await?;
-                // STUB(story-3.1): business gate (wallet-ownership /
-                // price-lock checks) — always passes for now. Story 2.4's
-                // HODL substrate auto-settles every accepted HTLC so the
-                // gateway preserves "regular invoice" UX on top of the
-                // HODL path. galoy's `handleHeldInvoice` is the model.
+                // Auto-settle every accepted HTLC core's only decline gate here
+                // (`WalletInvoiceChecker.shouldDecline`) is USD price-lock expiry;
+                // this gateway is BTC-only.
                 if let Err(e) = self.settle_hold_invoice(payment_hash).await {
                     ::tracing::error!(
                         payment_hash = %payment_hash.to_hex(),

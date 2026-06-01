@@ -12,8 +12,17 @@ use super::types::{
 };
 use crate::app::{App, AppError, FeeProbeRequest, NewInvoiceRequest, SendPaymentRequest};
 use crate::payment::{PaymentError, PaymentState};
+use crate::wallet::CallerAuth;
 
 pub struct Mutation;
+
+/// Pull the validated caller identity injected by the GraphQL server's JWKS
+/// layer. Absent when the request carried no valid JWT — the returned
+/// default `CallerAuth` is unauthenticated, so the wallet-ownership check
+/// denies.
+fn caller_auth(ctx: &Context<'_>) -> CallerAuth {
+    ctx.data_opt::<CallerAuth>().cloned().unwrap_or_default()
+}
 
 #[Object]
 impl Mutation {
@@ -34,10 +43,12 @@ impl Mutation {
         let expiry_seconds = expiry_minutes.saturating_mul(60);
 
         let request = NewInvoiceRequest {
+            caller_auth: caller_auth(ctx),
             wallet_id: input.wallet_id.into(),
             amount_msat: input.amount.to_msat(),
             expiry_seconds,
             memo: input.memo.map(|m| m.0),
+            external_id: input.external_id.map(|x| x.0),
         };
 
         match app.create_invoice(request).await {
@@ -73,6 +84,7 @@ impl Mutation {
             .map_err(|_| async_graphql::Error::new("App coordinator not configured"))?;
 
         let request = SendPaymentRequest {
+            caller_auth: caller_auth(ctx),
             wallet_id: input.wallet_id.into(),
             payment_request: input.payment_request.0,
             memo: input.memo.map(|m| m.0),
@@ -114,6 +126,7 @@ impl Mutation {
             .map_err(|_| async_graphql::Error::new("App coordinator not configured"))?;
 
         let request = FeeProbeRequest {
+            caller_auth: caller_auth(ctx),
             wallet_id: input.wallet_id.into(),
             payment_request: input.payment_request.0,
         };

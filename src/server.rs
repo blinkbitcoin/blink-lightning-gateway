@@ -7,8 +7,10 @@ pub mod config;
 pub mod error;
 pub mod graphql;
 pub mod grpc;
+pub mod jwks;
 
 pub use config::{GrpcServerConfig, HealthServerConfig, SubgraphServerConfig};
 pub use error::ServerError;
 pub use graphql::run_graphql_server;
 pub use grpc::run_grpc_server;
+pub use jwks::{JwtClaims, RemoteJwksDecoder};

@@ -8,7 +8,8 @@ use crate::primitives::MilliSatoshi;
 impl App {
     /// `lnInvoiceFeeProbe` use-case.
     pub async fn fee_probe(&self, request: FeeProbeRequest) -> Result<MilliSatoshi, AppError> {
-        self.check_wallet_ownership(&request.wallet_id).await?;
+        self.check_wallet_ownership(&request.caller_auth, &request.wallet_id)
+            .await?;
         let decoded = decode::decode_bolt11(&request.payment_request)?;
         let resp = self
             .lnd

@@ -20,6 +20,7 @@ pub mod helpers;
 pub mod reconcile_held_invoice;
 pub mod send_payment;
 pub mod settle_hold_invoice;
+pub mod sweep_orphan_holds;
 
 pub use error::AppError;
 pub use handle_invoice_update::InvoiceUpdateDispatcher;
@@ -30,6 +31,7 @@ use crate::outbox::EventPublisher;
 use crate::payment::Payments;
 use crate::primitives::{MilliSatoshi, WalletId};
 use crate::symphony::SymphonyClient;
+use crate::wallet::{CallerAuth, WalletOwnershipChecker};
 
 /// Operating mode. `DryRun` short-circuits LND + DB writes — useful for
 /// FR2's eventual shadow-mode plumbing. Slice 1a only ever runs `Live`;
@@ -42,14 +44,17 @@ pub enum Mode {
 
 #[derive(Clone, Debug)]
 pub struct NewInvoiceRequest {
+    pub caller_auth: CallerAuth,
     pub wallet_id: WalletId,
     pub amount_msat: MilliSatoshi,
     pub expiry_seconds: u32,
     pub memo: Option<String>,
+    pub external_id: Option<String>,
 }
 
 #[derive(Clone, Debug)]
 pub struct SendPaymentRequest {
+    pub caller_auth: CallerAuth,
     pub wallet_id: WalletId,
     pub payment_request: String,
     pub memo: Option<String>,
@@ -57,6 +62,7 @@ pub struct SendPaymentRequest {
 
 #[derive(Clone, Debug)]
 pub struct FeeProbeRequest {
+    pub caller_auth: CallerAuth,
     pub wallet_id: WalletId,
     pub payment_request: String,
 }
@@ -68,6 +74,7 @@ pub struct App {
     pub(crate) lnd: Arc<dyn LndApi>,
     pub(crate) outbox: EventPublisher,
     pub(crate) symphony: Arc<dyn SymphonyClient>,
+    pub(crate) ownership: Arc<dyn WalletOwnershipChecker>,
     pub(crate) pool: PgPool,
     pub(crate) mode: Mode,
     pub(crate) invoice_dispatcher: InvoiceUpdateDispatcher,
@@ -79,6 +86,7 @@ impl App {
         lnd: Arc<dyn LndApi>,
         outbox: EventPublisher,
         symphony: Arc<dyn SymphonyClient>,
+        ownership: Arc<dyn WalletOwnershipChecker>,
         invoice_dispatcher: InvoiceUpdateDispatcher,
     ) -> Self {
         Self {
@@ -87,6 +95,7 @@ impl App {
             lnd,
             outbox,
             symphony,
+            ownership,
             pool,
             mode: Mode::Live,
             invoice_dispatcher,
