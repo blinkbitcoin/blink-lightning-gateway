@@ -1,0 +1,77 @@
+syntax = "proto3";
+
+// Wire-compatible CLIENT-side copy of Symphony's additive
+// `SpendAuthorizationService` (cross-repo `symphony` branch
+// `lightning-gateway-3-1`, ADR-0003). The gateway only generates the
+// client; Symphony owns the server. `package symphony;` is load-bearing:
+// gRPC routes on `/symphony.SpendAuthorizationService/<Method>`, so the
+// package + service + field numbers MUST match Symphony's proto exactly.
+// Only the spend-gate subset is vendored — the card messages in Symphony's
+// full `symphony.proto` are not needed here.
+package symphony;
+
+// Gateway-agnostic synchronous spend gate. Called by the gateway BEFORE
+// any LND send to atomically check balance + post a Cala hold (ADR-0003).
+service SpendAuthorizationService {
+  rpc AuthorizeSpend(SpendAuthorizeRequest) returns (SpendAuthorizeResponse);
+  rpc SettleSpendAuthorization(SpendSettleRequest) returns (SpendSettleResponse);
+  rpc VoidSpendAuthorization(SpendVoidRequest) returns (SpendVoidResponse);
+}
+
+message SpendAuthorizeRequest {
+  string correlation_id = 1;     // == idempotency_key == payment_hash.to_hex() (ADR-0002) for LN
+  AccountRef account = 2;
+  int64 sat_amount = 3;          // amount + max_fee, > 0
+  string idempotency_key = 4;    // == correlation_id; kept distinct for future divergence
+}
+
+message AccountRef {
+  AccountKind kind = 1;
+  string id = 2;                 // wallet_id for WALLET_LIABILITY; blink_account_id for CARD_COLLATERAL
+}
+
+enum AccountKind {
+  ACCOUNT_KIND_UNSPECIFIED = 0;
+  ACCOUNT_KIND_WALLET_LIABILITY = 1;
+  ACCOUNT_KIND_CARD_COLLATERAL = 2;
+}
+
+message SpendAuthorizeResponse {
+  bool authorized = 1;
+  string authorization_id = 2;
+  int64 sat_amount_encumbered = 3;
+  SpendDeclineReason decline_reason = 4;
+  string decline_message = 5;
+}
+
+enum SpendDeclineReason {
+  SPEND_DECLINE_UNSPECIFIED = 0;
+  SPEND_DECLINE_INSUFFICIENT_BALANCE = 1;
+  SPEND_DECLINE_ACCOUNT_NOT_FOUND = 2;
+  SPEND_DECLINE_ACCOUNT_FROZEN = 3;
+  SPEND_DECLINE_AMOUNT_EXCEEDS_LIMIT = 4;
+  SPEND_DECLINE_INTERNAL_ERROR = 5;
+}
+
+message SpendSettleRequest {
+  string correlation_id = 1;
+  string authorization_id = 2;
+  int64 sat_amount_settled = 3;
+}
+
+message SpendSettleResponse {
+  string settlement_id = 1;
+  int64 settled_sat_amount = 2;
+  string cala_tx_id = 3;
+}
+
+message SpendVoidRequest {
+  string correlation_id = 1;
+  string authorization_id = 2;
+}
+
+message SpendVoidResponse {
+  bool success = 1;
+  string void_id = 2;
+  int64 released_sat_amount = 3;
+}

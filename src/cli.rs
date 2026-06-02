@@ -23,10 +23,12 @@ use crate::app::{App, InvoiceUpdateDispatcher};
 use crate::cli::config::{Config, EnvOverride};
 use crate::job::invoice_reconciliation_sweep::InvoiceReconciliationSweepInitializer;
 use crate::job::invoice_subscription_recovery_sweep::InvoiceSubscriptionRecoverySweepInitializer;
+use crate::job::orphan_hold_sweep::OrphanHoldSweepInitializer;
 use crate::lightning_payment_gateway::lightning_payment_gateway_server::LightningPaymentGatewayServer;
 use crate::lnd::{subscribe_payments, InvoiceUpdate, LndApi, LndClient, LndConfig};
 use crate::outbox::EventPublisher;
 use crate::symphony::{LightningSymphonyClient, SymphonyClient};
+use crate::wallet::{ApolloRouterOwnershipChecker, WalletOwnershipChecker};
 
 #[derive(Parser)]
 #[clap(long_about = None)]
@@ -128,26 +130,30 @@ async fn run_cmd(config: Config) -> anyhow::Result<()> {
 
     let outbox = EventPublisher::new(&pool);
 
-    // Story 2.2 ships a stub `LightningSymphonyClient` that always
-    // returns `Approved`. Real wiring against Symphony's
-    // `LightningAuthorizationService` lands in Story 3.1.
-    let symphony: Arc<dyn SymphonyClient> = Arc::new(LightningSymphonyClient::new(
-        config.symphony.grpc_endpoint.clone(),
-    ));
-    if let Err(e) = config.symphony.validate() {
-        warn!(
-            error = %e,
-            "symphony.grpc_endpoint not set; falling back to stub client (Approved-only)"
-        );
-    }
+    // Symphony spend-authorization client. A gateway that cannot
+    // reach its accounting system must NOT boot into a silently-approving
+    // state, so an unset/invalid endpoint is a hard boot failure.
+    // The channel connects lazily — a Symphony outage at runtime declines
+    // payments via the AuthorizeSpend fail-closed path.
+    config
+        .symphony
+        .validate()
+        .map_err(|e| anyhow::anyhow!("symphony config invalid: {e}"))?;
+    let symphony: Arc<dyn SymphonyClient> = Arc::new(LightningSymphonyClient::connect_lazy(
+        &config.symphony.grpc_endpoint,
+    )?);
+
+    // Cross-subgraph wallet-ownership checker
+    let ownership: Arc<dyn WalletOwnershipChecker> =
+        Arc::new(ApolloRouterOwnershipChecker::new(&config.wallet_ownership));
 
     let cancel = CancellationToken::new();
 
-    // invoice-update dispatcher + consumer task. The
-    // dispatcher owns the LND handle + the shared mpsc Sender; threaded
-    // into `App::new` so `App::create_invoice` spawns a per-hash
-    // `subscribe_invoice` listener at invoice-creation time, and the
-    // recovery sweep re-spawns listeners for any open invoice at boot.
+    // invoice-update dispatcher + consumer task. The dispatcher owns
+    // the LND handle + the shared mpsc Sender; threaded into `App::new`
+    // so `App::create_invoice` spawns a per-hash `subscribe_invoice`
+    // listener at invoice-creation time, and the recovery sweep re-spawns
+    // listeners for any open invoice at boot.
     let (invoice_update_tx, mut invoice_update_rx) =
         tokio::sync::mpsc::channel::<InvoiceUpdate>(64);
     let invoice_dispatcher =
@@ -158,6 +164,7 @@ async fn run_cmd(config: Config) -> anyhow::Result<()> {
         lnd,
         outbox,
         symphony,
+        ownership,
         invoice_dispatcher.clone(),
     );
 
@@ -168,22 +175,24 @@ async fn run_cmd(config: Config) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("build JobSvcConfig: {e}"))?;
     let mut jobs = Jobs::init(jobs_config).await?;
 
-    // Initialize scheduled jobs
-    let (recovery_sweep_spawner, reconciliation_sweep_spawner) = if lnd_client.is_connected() {
-        let recovery = jobs.add_initializer(InvoiceSubscriptionRecoverySweepInitializer::new(
-            app.clone(),
-            invoice_dispatcher.clone(),
-        ));
-        let reconciliation =
-            jobs.add_initializer(InvoiceReconciliationSweepInitializer::new(app.clone()));
-        (Some(recovery), Some(reconciliation))
-    } else {
-        warn!(
-            "LND boot-stub mode: skipping invoice_subscription_recovery_sweep \
-             + invoice_reconciliation_sweep registration"
-        );
-        (None, None)
-    };
+    // Initialize scheduled jobs.
+    let (recovery_sweep_spawner, reconciliation_sweep_spawner, orphan_hold_sweep_spawner) =
+        if lnd_client.is_connected() {
+            let recovery = jobs.add_initializer(InvoiceSubscriptionRecoverySweepInitializer::new(
+                app.clone(),
+                invoice_dispatcher.clone(),
+            ));
+            let reconciliation =
+                jobs.add_initializer(InvoiceReconciliationSweepInitializer::new(app.clone()));
+            let orphan_hold = jobs.add_initializer(OrphanHoldSweepInitializer::new(app.clone()));
+            (Some(recovery), Some(reconciliation), Some(orphan_hold))
+        } else {
+            warn!(
+                "LND boot-stub mode: skipping invoice_subscription_recovery_sweep \
+                 + invoice_reconciliation_sweep + orphan_hold_sweep registration"
+            );
+            (None, None, None)
+        };
 
     jobs.start_poll().await.context("Jobs::start_poll")?;
 
@@ -198,6 +207,12 @@ async fn run_cmd(config: Config) -> anyhow::Result<()> {
             .spawn_unique(JobId::new(), ())
             .await
             .context("spawn_unique invoice_reconciliation_sweep")?;
+    }
+    if let Some(spawner) = orphan_hold_sweep_spawner {
+        spawner
+            .spawn_unique(JobId::new(), ())
+            .await
+            .context("spawn_unique orphan_hold_sweep")?;
     }
 
     let (send, mut receive) = tokio::sync::mpsc::channel::<anyhow::Result<()>>(1);

@@ -18,10 +18,7 @@ impl SymphonyConfig {
     /// than letting an obscure connection error surface at first call.
     pub fn validate(&self) -> Result<(), String> {
         if self.grpc_endpoint.trim().is_empty() {
-            return Err(
-                "symphony.grpc_endpoint must be set (e.g. http://symphony:6580); empty value rejected"
-                    .to_owned(),
-            );
+            return Err("symphony.grpc_endpoint must be set; empty value rejected".to_owned());
         }
         Ok(())
     }

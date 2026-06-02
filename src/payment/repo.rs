@@ -4,6 +4,7 @@
 //! INSERT in `create_in_op` and UPDATE in `update_in_op` from the
 //! column list below.
 
+use chrono::{DateTime, Utc};
 use es_entity::EsRepo;
 #[allow(unused_imports)]
 use es_entity::{EsEntity, EsEvent};
@@ -36,5 +37,30 @@ pub struct Payments {
 impl Payments {
     pub fn new(pool: &PgPool) -> Self {
         Self { pool: pool.clone() }
+    }
+
+    /// Payment intents stranded in `initiated` past `older_than` — the
+    /// orphan-hold sweep anchor (ADR-0003 / AC10). A payment only stays
+    /// `initiated` if the gateway crashed between persisting the intent and
+    /// the post-LND transition; the real LND payment-subscription moves
+    /// genuinely in-flight payments to `pending` independently, so a row
+    /// still `initiated` past the idle threshold has no live HTLC and its
+    /// hold is safe to void.
+    pub async fn list_stranded_initiated(
+        &self,
+        older_than: DateTime<Utc>,
+        limit: i64,
+    ) -> Result<Vec<PaymentHash>, super::PaymentError> {
+        let rows = sqlx::query!(
+            r#"SELECT payment_hash as "payment_hash: PaymentHash"
+               FROM payments
+               WHERE state = 'initiated' AND created_at < $1
+               LIMIT $2"#,
+            older_than,
+            limit,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|r| r.payment_hash).collect())
     }
 }
