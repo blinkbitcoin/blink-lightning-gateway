@@ -108,12 +108,13 @@ async fn seed_held_invoice(
 ) -> (App, PaymentHash, MilliSatoshi) {
     let invoices_repo = Invoices::new(pool);
     let outbox = EventPublisher::new(pool);
-    let symphony: Arc<dyn SymphonyClient> = Arc::new(LightningSymphonyClient::new(""));
+    let symphony: Arc<dyn SymphonyClient> = Arc::new(LightningSymphonyClient::boot_stub());
     let app = App::new(
         pool.clone(),
         lnd,
         outbox,
         symphony,
+        crate::common::CannedWalletOwnership::allow(),
         InvoiceUpdateDispatcher::for_test(),
     );
 
@@ -127,6 +128,7 @@ async fn seed_held_invoice(
         Some(parked),
         3600,
         BoltInvoice::new("lnbc7500n1pj..."),
+        "ext-id".to_owned(),
         Timestamp::now(),
     )
     .expect("valid new invoice");
@@ -168,13 +170,14 @@ async fn reconcile_held_to_settled_when_lnd_says_settled() {
         payment_preimage: Some(preimage_for_lookup),
     };
     let outbox = EventPublisher::new(&pool);
-    let symphony: Arc<dyn SymphonyClient> = Arc::new(LightningSymphonyClient::new(""));
+    let symphony: Arc<dyn SymphonyClient> = Arc::new(LightningSymphonyClient::boot_stub());
     let lnd = Arc::new(LookupStubLnd::new(lookup_result));
     let app = App::new(
         pool.clone(),
         lnd.clone(),
         outbox,
         symphony,
+        crate::common::CannedWalletOwnership::allow(),
         InvoiceUpdateDispatcher::for_test(),
     );
 
@@ -264,13 +267,14 @@ async fn reconcile_held_to_canceled_when_lnd_says_canceled() {
         payment_preimage: None,
     };
     let outbox = EventPublisher::new(&pool);
-    let symphony: Arc<dyn SymphonyClient> = Arc::new(LightningSymphonyClient::new(""));
+    let symphony: Arc<dyn SymphonyClient> = Arc::new(LightningSymphonyClient::boot_stub());
     let lnd = Arc::new(LookupStubLnd::new(lookup_result));
     let app = App::new(
         pool.clone(),
         lnd.clone(),
         outbox,
         symphony,
+        crate::common::CannedWalletOwnership::allow(),
         InvoiceUpdateDispatcher::for_test(),
     );
 
@@ -349,13 +353,14 @@ async fn reconcile_held_drives_settle_when_lnd_says_accepted() {
         payment_preimage: None,
     };
     let outbox = EventPublisher::new(&pool);
-    let symphony: Arc<dyn SymphonyClient> = Arc::new(LightningSymphonyClient::new(""));
+    let symphony: Arc<dyn SymphonyClient> = Arc::new(LightningSymphonyClient::boot_stub());
     let lnd = Arc::new(LookupStubLnd::new(lookup_result));
     let app = App::new(
         pool.clone(),
         lnd.clone(),
         outbox,
         symphony,
+        crate::common::CannedWalletOwnership::allow(),
         InvoiceUpdateDispatcher::for_test(),
     );
 

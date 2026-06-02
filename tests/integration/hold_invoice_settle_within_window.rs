@@ -102,12 +102,13 @@ async fn hold_invoice_settle_within_window_e2e() {
 
     let lnd = Arc::new(RecordingLnd::new());
     let outbox = EventPublisher::new(&pool);
-    let symphony: Arc<dyn SymphonyClient> = Arc::new(LightningSymphonyClient::new(""));
+    let symphony: Arc<dyn SymphonyClient> = Arc::new(LightningSymphonyClient::boot_stub());
     let app = App::new(
         pool.clone(),
         lnd.clone(),
         outbox,
         symphony,
+        crate::common::CannedWalletOwnership::allow(),
         InvoiceUpdateDispatcher::for_test(),
     );
 
@@ -117,10 +118,12 @@ async fn hold_invoice_settle_within_window_e2e() {
     let wallet_id = WalletId::from(Uuid::now_v7());
     let inv = app
         .create_invoice(NewInvoiceRequest {
+            caller_auth: Default::default(),
             wallet_id,
             amount_msat: MilliSatoshi::new(500_000),
             expiry_seconds: 3600,
             memo: Some("hold-settle-test".to_owned()),
+            external_id: None,
         })
         .await
         .expect("create HODL invoice");

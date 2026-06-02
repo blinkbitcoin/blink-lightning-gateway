@@ -97,10 +97,12 @@ impl LndApi for CannedErrLnd {
 
 fn ok_request() -> NewInvoiceRequest {
     NewInvoiceRequest {
+        caller_auth: Default::default(),
         wallet_id: WalletId::from(Uuid::now_v7()),
         amount_msat: MilliSatoshi::new(1_000_000),
         expiry_seconds: 3600,
         memo: Some("test".to_owned()),
+        external_id: None,
     }
 }
 
@@ -109,12 +111,13 @@ async fn create_invoice_persists_invoice_and_event_rows() {
     let db = TestDatabase::new().await.expect("test db");
     let pool = db.pool.clone();
     let outbox = EventPublisher::new(&pool);
-    let symphony: Arc<dyn SymphonyClient> = Arc::new(LightningSymphonyClient::new(""));
+    let symphony: Arc<dyn SymphonyClient> = Arc::new(LightningSymphonyClient::boot_stub());
     let app = App::new(
         pool.clone(),
         Arc::new(CannedOkLnd),
         outbox,
         symphony,
+        crate::common::CannedWalletOwnership::allow(),
         InvoiceUpdateDispatcher::for_test(),
     );
 
@@ -147,12 +150,13 @@ async fn create_invoice_propagates_invoice_error() {
     let db = TestDatabase::new().await.expect("test db");
     let pool = db.pool.clone();
     let outbox = EventPublisher::new(&pool);
-    let symphony: Arc<dyn SymphonyClient> = Arc::new(LightningSymphonyClient::new(""));
+    let symphony: Arc<dyn SymphonyClient> = Arc::new(LightningSymphonyClient::boot_stub());
     let app = App::new(
         pool.clone(),
         Arc::new(CannedOkLnd),
         outbox,
         symphony,
+        crate::common::CannedWalletOwnership::allow(),
         InvoiceUpdateDispatcher::for_test(),
     );
     let mut bad = ok_request();
@@ -169,12 +173,13 @@ async fn create_invoice_propagates_lnd_error() {
     let db = TestDatabase::new().await.expect("test db");
     let pool = db.pool.clone();
     let outbox = EventPublisher::new(&pool);
-    let symphony: Arc<dyn SymphonyClient> = Arc::new(LightningSymphonyClient::new(""));
+    let symphony: Arc<dyn SymphonyClient> = Arc::new(LightningSymphonyClient::boot_stub());
     let app = App::new(
         pool.clone(),
         Arc::new(CannedErrLnd),
         outbox,
         symphony,
+        crate::common::CannedWalletOwnership::allow(),
         InvoiceUpdateDispatcher::for_test(),
     );
     let err = app.create_invoice(ok_request()).await.unwrap_err();

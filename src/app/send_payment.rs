@@ -1,6 +1,5 @@
 //! `lnInvoicePaymentSend` use-case + the three transition helpers it
-//! drives (`transition_to_pending`, `complete_fast_settled`,
-//! `complete_fast_failed`).
+//! drives (`transition_to_pending`, `settle_inline`, `fail_inline`).
 
 use chrono::Utc;
 use es_entity::Idempotent;
@@ -12,64 +11,46 @@ use crate::lnd::{SendPaymentParams, SendPaymentStatus};
 use crate::outbox::NewOutboxEvent;
 use crate::payment::{FailureReason, Hop, NewPayment, Payment, PaymentError};
 use crate::primitives::{BoltInvoice, MilliSatoshi, PaymentHash, Preimage, Timestamp, WalletId};
-use crate::symphony::{SymphonyAuthorizeRequest, SymphonyAuthorizeStatus};
+use crate::symphony::{
+    is_authorize_unavailable, AccountKind, AccountRef, SymphonyAuthorizeRequest,
+    SymphonyAuthorizeStatus,
+};
 
 impl App {
-    /// `lnInvoicePaymentSend` use-case.
+    /// `lnInvoicePaymentSend` use-case. ADR-0003 §5 ordering (mirrors galoy's
+    /// `executePaymentViaLn`, `send-lightning.ts:725-820`): ownership → decode →
+    /// persist intent → synchronous `authorize_spend` → LND → dispatch on status.
     ///
-    /// Flow (mirrors galoy's `executePaymentViaLn` at
-    /// `blink/core/api/src/app/payments/send-lightning.ts:725-820`):
-    ///   1. (STUB) wallet-ownership check.
-    ///   2. Decode the BOLT11 (pure-Rust via `lightning-invoice`).
-    ///   3. Compute `max_fee_msat = LnFees::max_for(amount_msat)`.
-    ///   4. Persist `NewPayment` + `Initiated` event (no outbox row yet —
-    ///      `OutgoingPaymentInitiated` fires only after LND accepts the send).
-    ///      A UNIQUE-violation on `payment_hash` here surfaces as
-    ///      `PaymentError::AlreadyPaid` so the GraphQL resolver can return
-    ///      `PaymentSendResult::AlreadyPaid` to the caller.
-    ///   5. (STUB) `Symphony::authorize_spend`. Reordered AFTER persist so
-    ///      a persist failure cannot leave Symphony holding an orphan
-    ///      authorization.
-    ///   6. Call LND `send_payment`. On error AFTER persist, transition
-    ///      the row to `Failed` so it doesn't orphan in `Initiated` state
-    ///      with no outbox row Symphony can use to release the hold.
-    ///   7. Verify `lnd_resp.payment_hash` matches the decoded hash —
-    ///      tonic stream reordering or LND bug could otherwise associate
-    ///      the row with the wrong actual payment.
-    ///   8. Dispatch by status:
-    ///      - `InFlight` → mark `Pending`, publish `OutgoingPaymentInitiated`.
-    ///      - `Succeeded` (fast-settle) → mark `Pending` + `Completed` in
-    ///        one tx, publish both `OutgoingPaymentInitiated` and
-    ///        `OutgoingPaymentCompleted` so Symphony's JOIN on
-    ///        correlation_id always finds both rows.
-    ///      - `Failed` (fast-fail) → mark `Pending` + `Failed` in one tx,
-    ///        publish both `OutgoingPaymentInitiated` and
-    ///        `OutgoingPaymentFailed`.
+    /// Two invariants carry the design: the balance-gating Cala hold is created
+    /// by `authorize_spend` BEFORE LND and fails closed (any auth error declines,
+    /// LND never called); and the intent row is persisted before authorize, so no
+    /// spend is authorized without a durable row for the orphan-hold sweep (AC10).
     pub async fn send_payment(&self, request: SendPaymentRequest) -> Result<Payment, AppError> {
         let now = Timestamp::now();
 
-        // 1. STUB(story-3.1): wallet-ownership check.
-        self.check_wallet_ownership(&request.wallet_id).await?;
+        self.check_wallet_ownership(&request.caller_auth, &request.wallet_id)
+            .await?;
 
-        // 2. Decode the BOLT11.
         let decoded = decode::decode_bolt11(&request.payment_request)?;
 
         // Story 2.2 drives only the amount-carrying path; the amountless
-        // App entrypoint (`lnNoAmountInvoicePaymentSend`, with a
-        // caller-supplied amount) lands in Story 5.1.
+        // entrypoint (`lnNoAmountInvoicePaymentSend`) lands in Story 5.1.
         let amount_msat = decoded.amount_msat.ok_or(PaymentError::AmountRequired)?;
 
-        // 3. Fee policy.
+        // Fee policy.
         let max_fee_msat = LnFees::max_for(amount_msat);
 
-        // 4. Persist intent FIRST (was step 5 pre-review). A failure here
-        //    short-circuits Symphony + LND, so the gateway never authorizes
-        //    a spend it didn't durably record. UNIQUE-violation on
-        //    `payment_hash` → `AlreadyPaid` (LN's own dedup invariant: the
-        //    second attempt cannot move different money than the first).
+        // Persist intent + emit OutgoingPaymentInitiated in one tx. Initiated
+        // is emitted exactly ONCE here, so every terminal path (sync or
+        // subscription) emits just its terminal event and Symphony's JOIN
+        // always finds the Initiated row. This is only the outbox event — the
+        // domain state stays `initiated` until LND's outcome is known (the
+        // orphan-hold sweep's anchor), never moved to `pending` before LND.
+        // UNIQUE-violation on `payment_hash` → `AlreadyPaid`.
         let payment_hash = decoded.payment_hash;
         let destination = decoded.destination.clone();
         let bolt_invoice = decoded.bolt_invoice.clone();
+        let amount_sat = amount_msat.whole_sat() as i64;
         let new_payment = NewPayment::try_new(decoded, request.wallet_id, None, max_fee_msat, now)?;
         let mut tx = self.pool.begin().await?;
         let payment = self
@@ -77,31 +58,63 @@ impl App {
             .create_in_op(&mut tx, new_payment)
             .await
             .map_err(PaymentError::from)?;
+        self.outbox
+            .publish_in_tx(
+                &mut tx,
+                self.build_initiated_outbox(
+                    payment_hash,
+                    request.wallet_id,
+                    amount_sat,
+                    max_fee_msat,
+                    &destination,
+                    &bolt_invoice,
+                ),
+            )
+            .await?;
         tx.commit().await?;
 
-        // 5. Symphony authorize. STUB(story-3.1): real
-        //    `Symphony::authorize_spend` roundtrip lands in the cross-repo
-        //    PR + Story 3.1. ADR-0003: when un-stubbed it MUST run
-        //    synchronously and atomically (check + Cala hold) and fail
-        //    closed. `correlation_id == idempotency_key == payment_hash`
-        //    is deliberate (B6 review decision): LND's own payment-hash
-        //    dedup makes `payment_hash` the canonical retry key for LN
-        //    payments, so two attempts for the same hash MUST resolve to
-        //    the same Symphony authorization decision.
-        let symphony_resp = self
+        // Synchronous AuthorizeSpend (ADR-0003): the balance-gating hold is
+        // created HERE, before LND, covering the worst-case `amount +
+        // max_fee`. correlation_id == idempotency_key == payment_hash
+        // so retries for the same hash resolve to one authorization.
+        let hold_sat = MilliSatoshi::new(amount_msat.as_u64() + max_fee_msat.as_u64())
+            .round_up_to_sat()
+            .whole_sat();
+        let symphony_resp = match self
             .symphony
             .authorize_spend(SymphonyAuthorizeRequest {
                 correlation_id: payment_hash.to_hex(),
-                account_id: request.wallet_id.to_string(),
-                sat_amount: amount_msat.whole_sat(),
+                account: AccountRef {
+                    kind: AccountKind::WalletLiability,
+                    id: request.wallet_id.to_string(),
+                },
+                sat_amount: hold_sat,
                 idempotency_key: payment_hash.to_hex(),
             })
-            .await?;
+            .await
+        {
+            Ok(resp) => resp,
+            Err(e) => {
+                let reason = if is_authorize_unavailable(&e) {
+                    FailureReason::Other(format!("Symphony service unavailable: {e}"))
+                } else {
+                    FailureReason::Other(format!("Symphony error: {e}"))
+                };
+                ::tracing::warn!(
+                    payment_hash = %payment_hash.to_hex(),
+                    wallet_id = %request.wallet_id,
+                    correlation_id = %payment_hash.to_hex(),
+                    error = %e,
+                    "AuthorizeSpend failed; declining payment fail-closed (LND not called)"
+                );
+                return self
+                    .fail_inline(payment, payment_hash, amount_sat, reason, now)
+                    .await;
+            }
+        };
         if matches!(symphony_resp.status, SymphonyAuthorizeStatus::Declined) {
-            // Symphony declined: roll the row forward to Failed so it
-            // doesn't orphan in Initiated. Outbox emits Initiated + Failed
-            // together (fast-fail shape) so Symphony's downstream side
-            // sees a complete lifecycle.
+            // Symphony declined: resolve to Failed. Initiated was already emitted
+            // at create, so this just adds the terminal event.
             let reason = match symphony_resp.decline_reason {
                 Some(crate::symphony::DeclineReason::InsufficientFunds) => {
                     FailureReason::InsufficientBalance
@@ -110,23 +123,12 @@ impl App {
                 None => FailureReason::Other("Symphony declined: no reason".to_owned()),
             };
             return self
-                .complete_fast_failed(
-                    payment,
-                    payment_hash,
-                    bolt_invoice,
-                    destination,
-                    request.wallet_id,
-                    amount_msat,
-                    max_fee_msat,
-                    reason,
-                    now,
-                )
+                .fail_inline(payment, payment_hash, amount_sat, reason, now)
                 .await;
         }
 
-        // 6. LND send. On error AFTER persist (E2 orphan-recovery), roll
-        //    the row to Failed so Symphony can release the hold via the
-        //    OutgoingPaymentFailed handler.
+        // 6. LND send. On error after persist, roll the row to Failed so
+        //    Symphony can release the hold via OutgoingPaymentFailed.
         let lnd_resp = match self
             .lnd
             .send_payment(SendPaymentParams {
@@ -145,24 +147,13 @@ impl App {
                     "LND send_payment errored after persist; rolling Payment to Failed"
                 );
                 return self
-                    .complete_fast_failed(
-                        payment,
-                        payment_hash,
-                        bolt_invoice,
-                        destination,
-                        request.wallet_id,
-                        amount_msat,
-                        max_fee_msat,
-                        reason,
-                        now,
-                    )
+                    .fail_inline(payment, payment_hash, amount_sat, reason, now)
                     .await;
             }
         };
 
-        // 7. Verify LND echoed back the same payment_hash we submitted.
-        //    Mismatch would mean the gateway's DB row would not match the
-        //    actual payment LND is tracking.
+        // 7. Verify LND echoed the same payment_hash we submitted; a mismatch
+        //    would bind our DB row to a different actual payment.
         if lnd_resp.payment_hash != payment_hash {
             ::tracing::error!(
                 expected = %payment_hash.to_hex(),
@@ -175,34 +166,14 @@ impl App {
                 lnd_resp.payment_hash.to_hex()
             ));
             return self
-                .complete_fast_failed(
-                    payment,
-                    payment_hash,
-                    bolt_invoice,
-                    destination,
-                    request.wallet_id,
-                    amount_msat,
-                    max_fee_msat,
-                    reason,
-                    now,
-                )
+                .fail_inline(payment, payment_hash, amount_sat, reason, now)
                 .await;
         }
 
         // 8. Dispatch on LND's response status.
         match lnd_resp.status {
             SendPaymentStatus::InFlight => {
-                self.transition_to_pending(
-                    payment,
-                    payment_hash,
-                    destination,
-                    request.wallet_id,
-                    amount_msat,
-                    max_fee_msat,
-                    bolt_invoice,
-                    now,
-                )
-                .await
+                self.transition_to_pending(payment, payment_hash, now).await
             }
             SendPaymentStatus::Succeeded => {
                 let preimage = lnd_resp.payment_preimage.ok_or_else(|| {
@@ -210,14 +181,10 @@ impl App {
                         "Succeeded status but payment_preimage missing/malformed".to_owned(),
                     ))
                 })?;
-                self.complete_fast_settled(
+                self.settle_inline(
                     payment,
                     payment_hash,
-                    bolt_invoice,
-                    destination,
-                    request.wallet_id,
-                    amount_msat,
-                    max_fee_msat,
+                    amount_sat,
                     preimage,
                     lnd_resp.fees_paid_msat,
                     lnd_resp.route_hops,
@@ -229,37 +196,20 @@ impl App {
                 let reason = lnd_resp.failure_reason.unwrap_or_else(|| {
                     FailureReason::Other("LND returned Failed with no reason".to_owned())
                 });
-                self.complete_fast_failed(
-                    payment,
-                    payment_hash,
-                    bolt_invoice,
-                    destination,
-                    request.wallet_id,
-                    amount_msat,
-                    max_fee_msat,
-                    reason,
-                    now,
-                )
-                .await
+                self.fail_inline(payment, payment_hash, amount_sat, reason, now)
+                    .await
             }
         }
     }
 
-    /// `Initiated → Pending` for the sync `InFlight` path. On
-    /// `ConcurrentModification` (the subscription handler beat us to a
-    /// terminal transition for the same payment), reload from the DB; if
-    /// the projection has moved to a terminal state, return the reloaded
-    /// row instead of erroring (the user will see Pending/Success).
-    #[allow(clippy::too_many_arguments)]
+    /// `Initiated → Pending` for the sync `InFlight` path. State-only update —
+    /// Initiated was already emitted at create, so no outbox write here. On
+    /// `ConcurrentModification` (the subscription handler beat us to a terminal
+    /// transition), reload and return the DB's state instead of erroring.
     async fn transition_to_pending(
         &self,
         mut payment: Payment,
         payment_hash: PaymentHash,
-        destination: String,
-        wallet_id: WalletId,
-        amount_msat: MilliSatoshi,
-        max_fee_msat: MilliSatoshi,
-        bolt_invoice: BoltInvoice,
         now: Timestamp,
     ) -> Result<Payment, AppError> {
         match payment.mark_pending(now)? {
@@ -274,15 +224,9 @@ impl App {
             }
         }
 
-        let amount_sat = amount_msat.whole_sat() as i64;
-        let mut tx = self.pool.begin().await?;
-        match self.payments.update_in_op(&mut tx, &mut payment).await {
-            Ok(_) => {}
+        match self.payments.update(&mut payment).await {
+            Ok(_) => Ok(payment),
             Err(e) if is_concurrent_modification(&e) => {
-                // Subscription handler beat us to a terminal transition.
-                // Drop our tx and reload; whatever state the DB now shows
-                // is the source of truth.
-                drop(tx);
                 let reloaded = self
                     .payments
                     .find_by_payment_hash(&payment_hash)
@@ -293,55 +237,34 @@ impl App {
                     state = %reloaded.state,
                     "transition_to_pending: concurrent modification; reloaded"
                 );
-                return Ok(reloaded);
+                Ok(reloaded)
             }
-            Err(e) => return Err(PaymentError::from(e).into()),
-        };
-        self.outbox
-            .publish_in_tx(
-                &mut tx,
-                self.build_initiated_outbox(
-                    payment_hash,
-                    wallet_id,
-                    amount_sat,
-                    max_fee_msat,
-                    &destination,
-                    &bolt_invoice,
-                ),
-            )
-            .await?;
-        tx.commit().await?;
-        Ok(payment)
+            Err(e) => Err(PaymentError::from(e).into()),
+        }
     }
 
-    /// Sync fast-settle: LND's first stream message is `Succeeded`.
-    /// Emits both `OutgoingPaymentInitiated` and `OutgoingPaymentCompleted`
-    /// in one transaction so Symphony's `LIGHTNING_PAYMENT_OUT` JOIN on
-    /// correlation_id always finds the prior Initiated row.
+    /// In-request settle for the sync `Succeeded` path: LND's first stream
+    /// message is already `Succeeded`, so resolve the still-`Initiated` payment
+    /// straight through `Pending → Completed` and emit
+    /// `OutgoingPaymentCompleted` (Initiated was already emitted at create).
     #[allow(clippy::too_many_arguments)]
-    async fn complete_fast_settled(
+    async fn settle_inline(
         &self,
         mut payment: Payment,
         payment_hash: PaymentHash,
-        bolt_invoice: BoltInvoice,
-        destination: String,
-        wallet_id: WalletId,
-        amount_msat: MilliSatoshi,
-        max_fee_msat: MilliSatoshi,
+        amount_sat: i64,
         preimage: Preimage,
         fees_paid_msat: MilliSatoshi,
         route_hops: Vec<Hop>,
         now: Timestamp,
     ) -> Result<Payment, AppError> {
-        // Queue Pending + Completed events in one go; update_in_op
-        // persists both atomically.
         match payment.mark_pending(now)? {
             Idempotent::Executed(()) => {}
             Idempotent::AlreadyApplied => {
                 ::tracing::info!(
                     payment_hash = %payment_hash.to_hex(),
                     current_state = %payment.state,
-                    "fast_settled: mark_pending ignored (duplicate); proceeding to settle"
+                    "settle_inline: mark_pending ignored (duplicate); proceeding to settle"
                 );
             }
         }
@@ -351,31 +274,17 @@ impl App {
                 ::tracing::info!(
                     payment_hash = %payment_hash.to_hex(),
                     current_state = %payment.state,
-                    "fast_settled: settle ignored — duplicate SUCCEEDED replay"
+                    "settle_inline: settle ignored — duplicate SUCCEEDED replay"
                 );
                 return Ok(payment);
             }
         }
 
-        let amount_sat = amount_msat.whole_sat() as i64;
         let mut tx = self.pool.begin().await?;
         self.payments
             .update_in_op(&mut tx, &mut payment)
             .await
             .map_err(PaymentError::from)?;
-        self.outbox
-            .publish_in_tx(
-                &mut tx,
-                self.build_initiated_outbox(
-                    payment_hash,
-                    wallet_id,
-                    amount_sat,
-                    max_fee_msat,
-                    &destination,
-                    &bolt_invoice,
-                ),
-            )
-            .await?;
         let hops_json = hops_to_json(&route_hops);
         self.outbox
             .publish_in_tx(
@@ -397,20 +306,16 @@ impl App {
         Ok(payment)
     }
 
-    /// Sync fast-fail: LND's first message is `Failed`, OR Symphony
-    /// declined, OR `send_payment` itself errored after persist (E2
-    /// orphan recovery). Emits both `OutgoingPaymentInitiated` and
-    /// `OutgoingPaymentFailed` in one transaction.
-    #[allow(clippy::too_many_arguments)]
-    async fn complete_fast_failed(
+    /// In-request fail for the sync failure paths: LND's first message is
+    /// `Failed`, Symphony declined/errored, or `send_payment` errored after
+    /// persist. Resolves the still-`Initiated` payment through `Pending →
+    /// Failed` and emits `OutgoingPaymentFailed` (Initiated already emitted at
+    /// create).
+    async fn fail_inline(
         &self,
         mut payment: Payment,
         payment_hash: PaymentHash,
-        bolt_invoice: BoltInvoice,
-        destination: String,
-        wallet_id: WalletId,
-        amount_msat: MilliSatoshi,
-        max_fee_msat: MilliSatoshi,
+        amount_sat: i64,
         failure_reason: FailureReason,
         now: Timestamp,
     ) -> Result<Payment, AppError> {
@@ -421,7 +326,7 @@ impl App {
                 ::tracing::info!(
                     payment_hash = %payment_hash.to_hex(),
                     current_state = %payment.state,
-                    "fast_failed: mark_pending ignored (duplicate); proceeding to fail"
+                    "fail_inline: mark_pending ignored (duplicate); proceeding to fail"
                 );
             }
         }
@@ -431,31 +336,17 @@ impl App {
                 ::tracing::info!(
                     payment_hash = %payment_hash.to_hex(),
                     current_state = %payment.state,
-                    "fast_failed: fail ignored — duplicate FAILED replay"
+                    "fail_inline: fail ignored — duplicate FAILED replay"
                 );
                 return Ok(payment);
             }
         }
 
-        let amount_sat = amount_msat.whole_sat() as i64;
         let mut tx = self.pool.begin().await?;
         self.payments
             .update_in_op(&mut tx, &mut payment)
             .await
             .map_err(PaymentError::from)?;
-        self.outbox
-            .publish_in_tx(
-                &mut tx,
-                self.build_initiated_outbox(
-                    payment_hash,
-                    wallet_id,
-                    amount_sat,
-                    max_fee_msat,
-                    &destination,
-                    &bolt_invoice,
-                ),
-            )
-            .await?;
         self.outbox
             .publish_in_tx(
                 &mut tx,

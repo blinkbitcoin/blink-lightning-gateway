@@ -133,6 +133,14 @@ impl SymphonyClient for CannedSymphonyClient {
             decline_reason: None::<DeclineReason>,
         })
     }
+
+    async fn void_spend_authorization(
+        &self,
+        _correlation_id: String,
+        _authorization_id: String,
+    ) -> Result<(), SymphonyError> {
+        Ok(())
+    }
 }
 
 fn build_test_schema(app: App) -> GatewaySchema {
@@ -265,6 +273,7 @@ async fn payment_send_happy_path_drives_outbox_into_symphony_stub() {
         lnd,
         outbox,
         symphony_for_app,
+        crate::common::CannedWalletOwnership::allow(),
         InvoiceUpdateDispatcher::for_test(),
     );
     let schema = build_test_schema(app.clone());

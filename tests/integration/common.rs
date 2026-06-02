@@ -4,13 +4,49 @@
 //! container startup and pool connection — both can fail under parallel
 //! test load when Docker is slow to map ports or accept connections.
 
+use std::sync::Arc;
 use std::time::Duration;
 
+use blink_lightning_gateway::primitives::WalletId;
+use blink_lightning_gateway::wallet::{CallerAuth, WalletOwnershipChecker, WalletOwnershipError};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use testcontainers::runners::AsyncRunner;
 use testcontainers::ContainerAsync;
 use testcontainers_modules::postgres::Postgres as PgImage;
+
+/// Hand-written `WalletOwnershipChecker` stub — the integration suite can't
+/// see the lib's `mockall::automock` mocks (gated on lib `cfg(test)`), so we
+/// hand-roll one per the CLAUDE.md convention. `allow` approves every check
+/// (the default for tests that aren't exercising ownership); `deny` rejects.
+pub struct CannedWalletOwnership {
+    allow: bool,
+}
+
+impl CannedWalletOwnership {
+    pub fn allow() -> Arc<dyn WalletOwnershipChecker> {
+        Arc::new(Self { allow: true })
+    }
+
+    pub fn deny() -> Arc<dyn WalletOwnershipChecker> {
+        Arc::new(Self { allow: false })
+    }
+}
+
+#[tonic::async_trait]
+impl WalletOwnershipChecker for CannedWalletOwnership {
+    async fn check(
+        &self,
+        _caller: &CallerAuth,
+        wallet_id: &WalletId,
+    ) -> Result<(), WalletOwnershipError> {
+        if self.allow {
+            Ok(())
+        } else {
+            Err(WalletOwnershipError::NotOwned(*wallet_id))
+        }
+    }
+}
 
 const CONTAINER_START_MAX_RETRIES: u32 = 3;
 const POOL_CONNECT_MAX_RETRIES: u32 = 5;

@@ -15,6 +15,6 @@ pub enum SymphonyError {
         reason: super::client::DeclineReason,
     },
 
-    #[error("symphony adapter is stubbed; real handshake lands in story 2.5")]
-    Stub,
+    #[error("symphony client config error: {0}")]
+    Config(String),
 }

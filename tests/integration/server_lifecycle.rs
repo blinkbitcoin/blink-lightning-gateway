@@ -147,12 +147,13 @@ async fn server_lifecycle_drains_in_flight_subscribers_on_cancel() {
     // shutdown, not the `lnInvoiceCreate` happy path.
     let lnd: Arc<dyn LndApi> = Arc::new(LndClient::boot_stub(LndConfig::stub()));
     let outbox = EventPublisher::new(&db.pool);
-    let symphony: Arc<dyn SymphonyClient> = Arc::new(LightningSymphonyClient::new(""));
+    let symphony: Arc<dyn SymphonyClient> = Arc::new(LightningSymphonyClient::boot_stub());
     let app = App::new(
         db.pool.clone(),
         lnd,
         outbox,
         symphony,
+        crate::common::CannedWalletOwnership::allow(),
         InvoiceUpdateDispatcher::for_test(),
     );
     let graphql_config = SubgraphServerConfig {

@@ -167,10 +167,12 @@ async fn run_symphony_stub(
 
 fn invoice_request(wallet: WalletId) -> NewInvoiceRequest {
     NewInvoiceRequest {
+        caller_auth: Default::default(),
         wallet_id: wallet,
         amount_msat: MilliSatoshi::new(1_000_000),
         expiry_seconds: 3600,
         memo: Some("test".to_owned()),
+        external_id: None,
     }
 }
 
@@ -186,12 +188,13 @@ async fn incoming_invoice_subscription_drives_full_lifecycle() {
 
     let lnd = Arc::new(CannedLnd::new());
     let outbox = EventPublisher::new(&pool);
-    let symphony: Arc<dyn SymphonyClient> = Arc::new(LightningSymphonyClient::new(""));
+    let symphony: Arc<dyn SymphonyClient> = Arc::new(LightningSymphonyClient::boot_stub());
     let app = App::new(
         pool.clone(),
         lnd.clone(),
         outbox,
         symphony,
+        crate::common::CannedWalletOwnership::allow(),
         InvoiceUpdateDispatcher::for_test(),
     );
 
@@ -388,12 +391,13 @@ async fn recovery_sweep_spawns_listener_for_open_and_held_only() {
     let _ = settled.settle(Timestamp::now()).unwrap();
     invoices_repo.update(&mut settled).await.unwrap();
 
-    let symphony: Arc<dyn SymphonyClient> = Arc::new(LightningSymphonyClient::new(""));
+    let symphony: Arc<dyn SymphonyClient> = Arc::new(LightningSymphonyClient::boot_stub());
     let app = App::new(
         pool.clone(),
         Arc::new(CannedLnd::new()),
         EventPublisher::new(&pool),
         symphony,
+        crate::common::CannedWalletOwnership::allow(),
         InvoiceUpdateDispatcher::for_test(),
     );
 
@@ -428,6 +432,7 @@ fn seed_invoice(preimage: Preimage, bolt: &str) -> NewInvoice {
         Some(MilliSatoshi::new(1_000_000)),
         3600,
         BoltInvoice::new(bolt),
+        "ext-id".to_owned(),
         Timestamp::now(),
     )
     .expect("valid NewInvoice")

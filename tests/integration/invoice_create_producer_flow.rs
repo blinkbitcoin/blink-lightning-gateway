@@ -96,12 +96,13 @@ async fn ln_invoice_create_persists_invoice_and_event_rows() {
         canned_bolt_invoice: "lnbc10n1pj1234testbolt11invoice",
     });
     let outbox = EventPublisher::new(&pool);
-    let symphony: Arc<dyn SymphonyClient> = Arc::new(LightningSymphonyClient::new(""));
+    let symphony: Arc<dyn SymphonyClient> = Arc::new(LightningSymphonyClient::boot_stub());
     let app = App::new(
         pool.clone(),
         lnd,
         outbox,
         symphony,
+        crate::common::CannedWalletOwnership::allow(),
         InvoiceUpdateDispatcher::for_test(),
     );
     let schema = build_test_schema(app);
