@@ -15,6 +15,9 @@ use tracing::warn;
 /// JWKS key cache refresh interval (matches blink-card's 30 min).
 const REFRESH_INTERVAL: Duration = Duration::from_secs(1800);
 
+const FETCH_RETRY_COUNT: usize = 10;
+const FETCH_RETRY_BACKOFF: Duration = Duration::from_secs(2);
+
 /// Claims the gateway reads off a validated caller JWT. Only `sub` is
 /// needed (the membership-cache key); `exp` is validated by `jsonwebtoken`
 /// but not surfaced.
@@ -55,24 +58,35 @@ impl RemoteJwksDecoder {
     }
 
     async fn fetch_jwks(&self) -> Result<Vec<(Option<String>, DecodingKey)>, JwksError> {
-        let jwks: Jwks = self
-            .client
-            .get(&self.jwks_url)
-            .send()
-            .await
-            .map_err(|e| JwksError::FetchFailed(e.to_string()))?
-            .json()
-            .await
-            .map_err(|e| JwksError::FetchFailed(e.to_string()))?;
-        Ok(jwks
-            .keys
-            .into_iter()
-            .filter_map(|jwk| {
-                DecodingKey::from_rsa_components(&jwk.n, &jwk.e)
-                    .ok()
-                    .map(|key| (jwk.kid, key))
-            })
-            .collect())
+        let mut last_error = None;
+        for attempt in 1..=FETCH_RETRY_COUNT {
+            match self.client.get(&self.jwks_url).send().await {
+                Ok(response) => {
+                    let jwks: Jwks = response
+                        .json()
+                        .await
+                        .map_err(|e| JwksError::FetchFailed(e.to_string()))?;
+                    return Ok(jwks
+                        .keys
+                        .into_iter()
+                        .filter_map(|jwk| {
+                            DecodingKey::from_rsa_components(&jwk.n, &jwk.e)
+                                .ok()
+                                .map(|key| (jwk.kid, key))
+                        })
+                        .collect());
+                }
+                Err(e) => {
+                    last_error = Some(e.to_string());
+                    if attempt < FETCH_RETRY_COUNT {
+                        tokio::time::sleep(FETCH_RETRY_BACKOFF).await;
+                    }
+                }
+            }
+        }
+        Err(JwksError::FetchFailed(last_error.unwrap_or_else(|| {
+            "jwks fetch retries exhausted".to_owned()
+        })))
     }
 
     pub async fn refresh_keys(&self) -> Result<(), JwksError> {
@@ -81,8 +95,9 @@ impl RemoteJwksDecoder {
         Ok(())
     }
 
-    /// Background loop: refresh now, then every `REFRESH_INTERVAL`. A failed
-    /// refresh logs and retries on the next tick (existing keys stay live).
+    /// Background loop: refresh now, then every `REFRESH_INTERVAL`. A refresh
+    /// that fails even after its inner fetch-retry budget logs and waits for the
+    /// next tick (existing keys stay live).
     pub async fn refresh_keys_periodically(&self) {
         loop {
             if let Err(e) = self.refresh_keys().await {

@@ -158,10 +158,19 @@ impl ApolloRouterOwnershipChecker {
             warn!("walletOwnership.router_endpoint empty; using fail-closed boot stub");
             return Self::boot_stub(ttl);
         }
-        let http = reqwest::Client::builder()
+        // A build failure must not silently fall back to a timeout-less default
+        // client (a hung Router would then block every check forever). Deny
+        // fail-closed instead, same as an unconfigured endpoint above.
+        let http = match reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
             .build()
-            .unwrap_or_default();
+        {
+            Ok(client) => client,
+            Err(e) => {
+                warn!(error = %e, "walletOwnership: HTTP client build failed; using fail-closed boot stub");
+                return Self::boot_stub(ttl);
+            }
+        };
         Self {
             mode: Mode::Real {
                 http,
