@@ -11,6 +11,7 @@ mod incoming_invoice_subscription;
 mod invoice_consumer_flow;
 mod invoice_create_producer_flow;
 mod invoice_repo;
+mod orphan_hold_reconciliation;
 mod outbox_publisher;
 mod payment_repo;
 mod payment_send_happy_path;

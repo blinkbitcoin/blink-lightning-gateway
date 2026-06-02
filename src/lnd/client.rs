@@ -71,6 +71,18 @@ pub trait LndApi: Send + Sync {
     /// `invoice_reconciliation_sweep`) to recover from missed subscription events
     async fn lookup_invoice(&self, payment_hash: PaymentHash) -> Result<InvoiceUpdate, LndError>;
 
+    /// Query LND for the current state of an outbound payment by hash, via
+    /// `Router/TrackPaymentV2` (first message = current status, then drop the
+    /// stream). Used by the orphan-hold reconciliation sweep to confirm a
+    /// stranded `initiated` payment's REAL outcome before settling or releasing
+    /// its hold — never act on a time/state heuristic, which would void a
+    /// still-in-flight payment's hold (the lnd stuck-HTLC case, lnd#7697).
+    /// `PaymentNotFound` means LND never received it.
+    async fn lookup_payment(
+        &self,
+        payment_hash: PaymentHash,
+    ) -> Result<SendPaymentResponse, LndError>;
+
     async fn send_payment(
         &self,
         params: SendPaymentParams,
@@ -235,6 +247,44 @@ impl LndApi for LndClient {
         Ok(update)
     }
 
+    async fn lookup_payment(
+        &self,
+        payment_hash: PaymentHash,
+    ) -> Result<SendPaymentResponse, LndError> {
+        let mut inner = self.require_inner()?;
+        // `no_inflight_updates = false` so the FIRST message reflects the
+        // current state (including in-flight); we read it and drop the stream,
+        // same one-shot pattern as `send_payment`.
+        let req = routerrpc::TrackPaymentRequest {
+            payment_hash: payment_hash.as_bytes().to_vec(),
+            no_inflight_updates: false,
+        };
+        let mut stream = inner
+            .router()
+            .track_payment_v2(req)
+            .await
+            .map_err(map_track_payment_status)?
+            .into_inner();
+        let payment = stream
+            .message()
+            .await
+            .map_err(map_track_payment_status)?
+            .ok_or_else(|| {
+                LndError::InvalidResponse(
+                    "TrackPaymentV2 stream closed without yielding a Payment".to_owned(),
+                )
+            })?;
+        let resp = lnd_payment_to_send_response(payment)?;
+        if resp.payment_hash != payment_hash {
+            return Err(LndError::InvalidResponse(format!(
+                "lookup_payment: requested {}, LND returned {}",
+                payment_hash.to_hex(),
+                resp.payment_hash.to_hex()
+            )));
+        }
+        Ok(resp)
+    }
+
     async fn send_payment(
         &self,
         params: SendPaymentParams,
@@ -331,6 +381,14 @@ pub(super) fn lnd_payment_to_send_response(
         route_hops,
         failure_reason,
     })
+}
+
+fn map_track_payment_status(status: tonic_lnd::tonic::Status) -> LndError {
+    if status.code() == tonic_lnd::tonic::Code::NotFound {
+        LndError::PaymentNotFound
+    } else {
+        LndError::Rpc(Box::new(status))
+    }
 }
 
 fn parse_hex_payment_hash(s: &str) -> Result<PaymentHash, LndError> {

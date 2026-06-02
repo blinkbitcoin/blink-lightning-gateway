@@ -23,6 +23,9 @@ pub enum LndError {
     #[error("invalid LND response: {0}")]
     InvalidResponse(String),
 
+    #[error("LND has no record of this payment")]
+    PaymentNotFound,
+
     // Slice-2 outbound-payment failure-mode variants, mapping LND's
     // `lnrpc.PaymentFailureReason` enum onto rust-side typed errors.
     #[error("payment timed out before LND found a route")]

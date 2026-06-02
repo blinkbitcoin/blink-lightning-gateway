@@ -1,99 +1,153 @@
 //! Orphan-hold reconciliation (ADR-0003 §Consequences / AC10).
 //!
-//! A synchronous `AuthorizeSpend` posts a Cala hold *before* LND is called.
-//! If the gateway then crashes between the hold and the post-LND transition,
-//! the `Payment` intent is left `initiated` with a hold that the normal
-//! lifecycle never settles or releases. This sweep finds those stranded
-//! intents and voids their holds directly via `VoidSpendAuthorization`.
+//! A synchronous `AuthorizeSpend` posts a Cala hold *before* LND is called, so
+//! a crash between the hold and the post-LND transition leaves the `Payment`
+//! stranded `initiated` with a hold nothing settles or releases. Each stranded
+//! intent's REAL outcome is confirmed at LND before acting: `Succeeded` →
+//! settle, `Failed` → release the hold, `InFlight`/`NotFound` → leave for the
+//! next tick. Terminal transitions reuse the shared
+//! `commit_completed`/`commit_failed` writers, so they reconcile idempotently
+//! with the live subscription.
 //!
-//! Safety: a payment that genuinely went in-flight is moved out of
-//! `initiated` by the LND payment-subscription (`handle_payment_update`), so
-//! a row still `initiated` past the idle threshold has no live HTLC. The
-//! void runs BEFORE the terminal transition — if Symphony is unreachable the
-//! payment stays `initiated` and the next tick retries (fail toward stuck
-//! funds, never toward lost funds).
+//! Using LND as source-of-truth is critical: a payment
+//! can sit IN_FLIGHT past the idle threshold (lnd stuck-HTLC, lnd#7697) and
+//! `handle_payment_update` no-ops on `InFlight`, so it is never moved out of
+//! `initiated` — voiding its hold blind would lose funds if it later settles.
 
 use std::time::Duration;
 
 use chrono::Utc;
 
 use crate::app::{App, AppError};
+use crate::lnd::{LndError, SendPaymentStatus};
 use crate::payment::{FailureReason, PaymentError, PaymentState};
 use crate::primitives::{PaymentHash, Timestamp};
 
+/// Per-payment LND lookup deadline. `TrackPaymentV2` is server-streaming and
+/// the sweep processes intents sequentially, so a stalled stream must not hang
+/// the whole tick — on elapse the intent is left for the next tick. Mirrors
+/// blink-core's `TIMEOUT_PAYMENT` (45s non-regtest) around `getPayment`.
+const LND_LOOKUP_TIMEOUT: Duration = Duration::from_secs(45);
+
 impl App {
-    /// Void holds for every payment stranded in `initiated` longer than
-    /// `idle`. Per-payment errors are logged and skipped — the next tick
-    /// retries. Returns the count of holds voided this tick.
+    /// Reconcile every payment stranded in `initiated` longer than `idle`
+    /// against LND. Per-payment errors are logged and skipped — the next tick
+    /// retries. Returns the count of intents driven to a terminal state.
     pub async fn sweep_orphan_holds(&self, idle: Duration, limit: i64) -> Result<usize, AppError> {
         let cutoff = Utc::now()
             - chrono::Duration::from_std(idle).unwrap_or_else(|_| chrono::Duration::minutes(10));
         let stranded = self.payments.list_stranded_initiated(cutoff, limit).await?;
 
-        let mut voided = 0;
+        let mut reconciled = 0;
         for payment_hash in stranded {
-            match self.void_orphan_hold(payment_hash).await {
-                Ok(true) => voided += 1,
+            match self.reconcile_orphan_hold(payment_hash).await {
+                Ok(true) => reconciled += 1,
                 Ok(false) => {}
                 Err(e) => ::tracing::error!(
                     payment_hash = %payment_hash.to_hex(),
                     error = %e,
-                    "orphan-hold sweep: void failed; leaving intent for the next tick"
+                    "orphan-hold sweep: reconcile failed; leaving intent for the next tick"
                 ),
             }
         }
-        Ok(voided)
+        Ok(reconciled)
     }
 
-    /// Void one stranded hold, then fail the intent. Returns `Ok(false)` if
-    /// the intent already left `initiated` between query and load (a race
-    /// with the subscription handler).
-    async fn void_orphan_hold(&self, payment_hash: PaymentHash) -> Result<bool, AppError> {
-        let mut payment = self
+    /// Reconcile one stranded `initiated` intent against LND's real outcome.
+    /// `Ok(true)` if it was driven to a terminal state (settled or failed),
+    /// `Ok(false)` if left untouched (raced out of `initiated`, still in-flight,
+    /// or unknown to LND).
+    async fn reconcile_orphan_hold(&self, payment_hash: PaymentHash) -> Result<bool, AppError> {
+        let payment = self
             .payments
             .find_by_payment_hash(&payment_hash)
             .await
             .map_err(PaymentError::from)?;
 
         if payment.state != PaymentState::Initiated {
+            // Raced with the subscription between query and load — already resolved.
             return Ok(false);
         }
 
-        // Void the hold FIRST (correlation_id == payment_hash, ADR-0002). The
-        // gateway never recorded the authorization_id for a crash-stranded
-        // intent, so it relies on Symphony's correlation_id-keyed idempotent
-        // void. If this errors, return early — the intent stays `initiated`
-        // and the next tick retries (the hold is NOT released, so funds are
-        // never lost).
-        self.symphony
-            .void_spend_authorization(payment_hash.to_hex(), String::new())
-            .await?;
-
-        // Only now mark the intent terminal. No outbox event: the hold was
-        // released by the direct void above, so re-emitting an
-        // OutgoingPaymentFailed (whose Symphony handler would also release)
-        // would double-handle.
-        // The intent is `Initiated` (re-checked above), so both transitions
-        // execute; the idempotent outcome is irrelevant here.
+        let amount_sat = payment.amount_msat.whole_sat() as i64;
+        let wallet_id = payment.wallet_id;
         let now = Timestamp::now();
-        let _ = payment.mark_pending(now)?;
-        let _ = payment.fail(
-            FailureReason::Other("orphan-hold sweep: stranded intent, hold voided".to_owned()),
-            now,
-        )?;
-        let mut tx = self.pool.begin().await?;
-        self.payments
-            .update_in_op(&mut tx, &mut payment)
-            .await
-            .map_err(PaymentError::from)?;
-        tx.commit().await?;
 
-        ::tracing::warn!(
-            payment_hash = %payment_hash.to_hex(),
-            wallet_id = %payment.wallet_id,
-            correlation_id = %payment_hash.to_hex(),
-            "orphan-hold sweep: voided stranded hold and failed the intent"
-        );
-        Ok(true)
+        // Confirm the REAL outcome at LND before touching the hold. Never decide
+        // from time+state alone — a still-in-flight payment past the threshold
+        // must not be voided. Bound the lookup so a stalled stream can't hang the
+        // tick.
+        let lookup = match tokio::time::timeout(
+            LND_LOOKUP_TIMEOUT,
+            self.lnd.lookup_payment(payment_hash),
+        )
+        .await
+        {
+            Ok(Ok(resp)) => resp,
+            Ok(Err(LndError::PaymentNotFound)) => {
+                ::tracing::warn!(
+                    payment_hash = %payment_hash.to_hex(),
+                    wallet_id = %wallet_id,
+                    "orphan-hold sweep: LND has no record of this payment; leaving initiated for the next tick / operator review"
+                );
+                return Ok(false);
+            }
+            Ok(Err(e)) => return Err(AppError::Lnd(e)),
+            Err(_elapsed) => {
+                ::tracing::warn!(
+                    payment_hash = %payment_hash.to_hex(),
+                    wallet_id = %wallet_id,
+                    "orphan-hold sweep: LND payment lookup timed out; leaving initiated for the next tick"
+                );
+                return Ok(false);
+            }
+        };
+
+        match lookup.status {
+            SendPaymentStatus::InFlight => {
+                ::tracing::info!(
+                    payment_hash = %payment_hash.to_hex(),
+                    wallet_id = %wallet_id,
+                    "orphan-hold sweep: LND still reports in-flight; leaving the hold in place"
+                );
+                Ok(false)
+            }
+            SendPaymentStatus::Succeeded => {
+                let preimage = lookup.payment_preimage.ok_or_else(|| {
+                    AppError::Lnd(LndError::InvalidResponse(
+                        "lookup_payment: Succeeded but payment_preimage missing".to_owned(),
+                    ))
+                })?;
+                self.commit_completed(
+                    payment,
+                    payment_hash,
+                    amount_sat,
+                    preimage,
+                    lookup.fees_paid_msat,
+                    lookup.route_hops,
+                    now,
+                )
+                .await?;
+                ::tracing::warn!(
+                    payment_hash = %payment_hash.to_hex(),
+                    wallet_id = %wallet_id,
+                    "orphan-hold sweep: LND settled a stranded intent; reconciled to completed"
+                );
+                Ok(true)
+            }
+            SendPaymentStatus::Failed => {
+                let reason = lookup.failure_reason.unwrap_or_else(|| {
+                    FailureReason::Other("LND reported Failed with no reason".to_owned())
+                });
+                self.commit_failed(payment, payment_hash, amount_sat, reason, now)
+                    .await?;
+                ::tracing::warn!(
+                    payment_hash = %payment_hash.to_hex(),
+                    wallet_id = %wallet_id,
+                    "orphan-hold sweep: LND failed a stranded intent; reconciled to failed and released the hold"
+                );
+                Ok(true)
+            }
+        }
     }
 }

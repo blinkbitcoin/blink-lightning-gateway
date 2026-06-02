@@ -88,6 +88,13 @@ impl LndApi for LookupStubLnd {
         Ok(self.lookup_result.clone())
     }
 
+    async fn lookup_payment(
+        &self,
+        _payment_hash: PaymentHash,
+    ) -> Result<SendPaymentResponse, LndError> {
+        Err(LndError::Stub)
+    }
+
     async fn send_payment(
         &self,
         _params: SendPaymentParams,

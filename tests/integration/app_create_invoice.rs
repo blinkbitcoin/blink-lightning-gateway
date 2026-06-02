@@ -48,6 +48,13 @@ impl LndApi for CannedOkLnd {
         Err(LndError::Stub)
     }
 
+    async fn lookup_payment(
+        &self,
+        _payment_hash: PaymentHash,
+    ) -> Result<SendPaymentResponse, LndError> {
+        Err(LndError::Stub)
+    }
+
     async fn send_payment(
         &self,
         _params: SendPaymentParams,
@@ -80,6 +87,13 @@ impl LndApi for CannedErrLnd {
     }
 
     async fn lookup_invoice(&self, _payment_hash: PaymentHash) -> Result<InvoiceUpdate, LndError> {
+        Err(LndError::Stub)
+    }
+
+    async fn lookup_payment(
+        &self,
+        _payment_hash: PaymentHash,
+    ) -> Result<SendPaymentResponse, LndError> {
         Err(LndError::Stub)
     }
 
