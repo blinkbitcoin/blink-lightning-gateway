@@ -10,6 +10,7 @@ use sqlx::PgPool;
 use std::sync::Arc;
 
 pub mod commit_invoice;
+pub mod commit_payment;
 pub mod create_invoice;
 pub mod decode;
 pub mod error;

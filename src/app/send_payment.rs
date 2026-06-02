@@ -4,7 +4,7 @@
 use chrono::Utc;
 use es_entity::Idempotent;
 
-use crate::app::helpers::{hops_to_json, is_concurrent_modification, lnd_error_to_failure_reason};
+use crate::app::helpers::{is_concurrent_modification, lnd_error_to_failure_reason};
 use crate::app::{decode, App, AppError, SendPaymentRequest};
 use crate::fees::LnFees;
 use crate::lnd::{SendPaymentParams, SendPaymentStatus};
@@ -243,10 +243,11 @@ impl App {
         }
     }
 
-    /// In-request settle for the sync `Succeeded` path: LND's first stream
-    /// message is already `Succeeded`, so resolve the still-`Initiated` payment
-    /// straight through `Pending → Completed` and emit
-    /// `OutgoingPaymentCompleted` (Initiated was already emitted at create).
+    /// In-request settle for the sync `Succeeded` path: record the `Pending`
+    /// step (LND's first message is already `Succeeded`, so the intent passes
+    /// straight through `Pending`), then commit via [`App::commit_completed`]
+    /// (the sole writer of `OutgoingPaymentCompleted`). Initiated was already
+    /// emitted at create.
     #[allow(clippy::too_many_arguments)]
     async fn settle_inline(
         &self,
@@ -268,49 +269,22 @@ impl App {
                 );
             }
         }
-        match payment.settle(preimage, fees_paid_msat, route_hops.clone(), now)? {
-            Idempotent::Executed(()) => {}
-            Idempotent::AlreadyApplied => {
-                ::tracing::info!(
-                    payment_hash = %payment_hash.to_hex(),
-                    current_state = %payment.state,
-                    "settle_inline: settle ignored — duplicate SUCCEEDED replay"
-                );
-                return Ok(payment);
-            }
-        }
-
-        let mut tx = self.pool.begin().await?;
-        self.payments
-            .update_in_op(&mut tx, &mut payment)
-            .await
-            .map_err(PaymentError::from)?;
-        let hops_json = hops_to_json(&route_hops);
-        self.outbox
-            .publish_in_tx(
-                &mut tx,
-                NewOutboxEvent::for_lightning_payment_completed(
-                    payment_hash.to_hex(),
-                    payment_hash.to_hex(),
-                    amount_sat,
-                    Utc::now(),
-                    serde_json::json!({
-                        "payment_preimage": preimage.to_hex(),
-                        "fees_paid_msat": fees_paid_msat.as_u64(),
-                        "route_hops": hops_json,
-                    }),
-                ),
-            )
-            .await?;
-        tx.commit().await?;
-        Ok(payment)
+        self.commit_completed(
+            payment,
+            payment_hash,
+            amount_sat,
+            preimage,
+            fees_paid_msat,
+            route_hops,
+            now,
+        )
+        .await
     }
 
-    /// In-request fail for the sync failure paths: LND's first message is
-    /// `Failed`, Symphony declined/errored, or `send_payment` errored after
-    /// persist. Resolves the still-`Initiated` payment through `Pending →
-    /// Failed` and emits `OutgoingPaymentFailed` (Initiated already emitted at
-    /// create).
+    /// In-request fail for the sync failure paths (LND `Failed`, Symphony
+    /// declined/errored, or `send_payment` errored after persist): record the
+    /// `Pending` step, then commit via [`App::commit_failed`] (the sole writer
+    /// of `OutgoingPaymentFailed`). Initiated was already emitted at create.
     async fn fail_inline(
         &self,
         mut payment: Payment,
@@ -319,7 +293,6 @@ impl App {
         failure_reason: FailureReason,
         now: Timestamp,
     ) -> Result<Payment, AppError> {
-        let reason_detail = failure_reason.detail_str();
         match payment.mark_pending(now)? {
             Idempotent::Executed(()) => {}
             Idempotent::AlreadyApplied => {
@@ -330,39 +303,8 @@ impl App {
                 );
             }
         }
-        match payment.fail(failure_reason, now)? {
-            Idempotent::Executed(()) => {}
-            Idempotent::AlreadyApplied => {
-                ::tracing::info!(
-                    payment_hash = %payment_hash.to_hex(),
-                    current_state = %payment.state,
-                    "fail_inline: fail ignored — duplicate FAILED replay"
-                );
-                return Ok(payment);
-            }
-        }
-
-        let mut tx = self.pool.begin().await?;
-        self.payments
-            .update_in_op(&mut tx, &mut payment)
+        self.commit_failed(payment, payment_hash, amount_sat, failure_reason, now)
             .await
-            .map_err(PaymentError::from)?;
-        self.outbox
-            .publish_in_tx(
-                &mut tx,
-                NewOutboxEvent::for_lightning_payment_failed(
-                    payment_hash.to_hex(),
-                    payment_hash.to_hex(),
-                    amount_sat,
-                    Utc::now(),
-                    serde_json::json!({
-                        "failure_reason": reason_detail,
-                    }),
-                ),
-            )
-            .await?;
-        tx.commit().await?;
-        Ok(payment)
     }
 
     fn build_initiated_outbox(
