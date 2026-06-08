@@ -133,6 +133,39 @@ impl NewPayment {
         })
     }
 
+    /// Intraledger transfer constructor. Unlike [`Self::try_new`], the
+    /// `max_fee_msat > 0` check does not apply: intraledger is zero-fee
+    /// (galoy `LnFees().intraLedgerFees()` → `{ btc: ZERO, usd: ZERO }`,
+    /// `ln-fees.ts:37-42`), so the field is `ZERO`. Amount-carrying only —
+    /// an amountless invoice yields `AmountRequired` (amountless intraledger
+    /// is Story 5.1). The transfer is posted synchronously by `AuthorizeSpend`
+    /// and the `Payment` is created already terminal (`settle` from
+    /// `Initiated`), so it never sits in `initiated` for the orphan-hold
+    /// sweep to see (ADR-0007).
+    pub fn try_new_intraledger(
+        decoded: DecodedInvoice,
+        wallet_id: WalletId,
+        initiated_at: Timestamp,
+    ) -> Result<Self, PaymentError> {
+        let amount_msat = decoded.amount_msat.ok_or(PaymentError::AmountRequired)?;
+        if amount_msat.as_u64() == 0 {
+            return Err(PaymentError::InvalidAmount);
+        }
+        if decoded.bolt_invoice.as_str().is_empty() {
+            return Err(PaymentError::EmptyBoltInvoice);
+        }
+        Ok(Self {
+            id: PaymentId::new(),
+            payment_hash: decoded.payment_hash,
+            wallet_id,
+            amount_msat,
+            max_fee_msat: MilliSatoshi::ZERO,
+            bolt_invoice: decoded.bolt_invoice,
+            destination: decoded.destination,
+            initiated_at,
+        })
+    }
+
     pub fn state_str(&self) -> String {
         PaymentState::Initiated.as_str().to_owned()
     }
@@ -506,6 +539,34 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, PaymentError::EmptyBoltInvoice));
+    }
+
+    #[test]
+    fn try_new_intraledger_is_zero_fee() {
+        // Intraledger is zero-fee — the constructor must NOT apply the LN
+        // `max_fee > 0` rule or copy a fee policy. Catches a regression where
+        // the intraledger path starts charging a max-fee budget.
+        let new = NewPayment::try_new_intraledger(
+            ok_decoded(),
+            WalletId::from(Uuid::now_v7()),
+            fixed_now(),
+        )
+        .expect("ok");
+        assert_eq!(new.amount_msat, MilliSatoshi::new(1_000_000));
+        assert_eq!(new.max_fee_msat, MilliSatoshi::ZERO);
+    }
+
+    #[test]
+    fn try_new_intraledger_amountless_is_amount_required() {
+        // Amountless intraledger is out of scope (Story 5.1); the constructor
+        // rejects it rather than silently defaulting an amount.
+        let err = NewPayment::try_new_intraledger(
+            amountless_decoded(),
+            WalletId::from(Uuid::now_v7()),
+            fixed_now(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, PaymentError::AmountRequired));
     }
 
     fn fresh_payment() -> Payment {

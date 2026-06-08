@@ -8,6 +8,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use blink_lightning_gateway::primitives::WalletId;
+use blink_lightning_gateway::symphony::{
+    SymphonyAuthorizeRequest, SymphonyAuthorizeResponse, SymphonyAuthorizeStatus, SymphonyClient,
+    SymphonyError,
+};
 use blink_lightning_gateway::wallet::{CallerAuth, WalletOwnershipChecker, WalletOwnershipError};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
@@ -45,6 +49,53 @@ impl WalletOwnershipChecker for CannedWalletOwnership {
         } else {
             Err(WalletOwnershipError::NotOwned(*wallet_id))
         }
+    }
+}
+
+/// Symphony stub that approves every `authorize_spend` and CAPTURES each
+/// request, so a test can assert the request shape (`sat_amount`,
+/// `gateway_metadata`). Story 3.1's `boot_stub` only covers the fail-closed
+/// decline path; the intraledger happy path needs approve + capture. Integration
+/// tests can't see the lib's `automock` mocks, so it's hand-written per CLAUDE.md.
+#[derive(Clone, Default)]
+pub struct RecordingSymphony {
+    pub requests: Arc<tokio::sync::Mutex<Vec<SymphonyAuthorizeRequest>>>,
+}
+
+impl RecordingSymphony {
+    /// `(client, captured-requests)`. The handle is shared with the returned
+    /// `Arc<dyn SymphonyClient>`, so assertions read the same `Vec`.
+    pub fn approving() -> (
+        Arc<dyn SymphonyClient>,
+        Arc<tokio::sync::Mutex<Vec<SymphonyAuthorizeRequest>>>,
+    ) {
+        let me = Self::default();
+        let requests = me.requests.clone();
+        (Arc::new(me), requests)
+    }
+}
+
+#[tonic::async_trait]
+impl SymphonyClient for RecordingSymphony {
+    async fn authorize_spend(
+        &self,
+        request: SymphonyAuthorizeRequest,
+    ) -> Result<SymphonyAuthorizeResponse, SymphonyError> {
+        let authorization_id = request.correlation_id.clone();
+        self.requests.lock().await.push(request);
+        Ok(SymphonyAuthorizeResponse {
+            status: SymphonyAuthorizeStatus::Approved,
+            authorization_id: Some(authorization_id),
+            decline_reason: None,
+        })
+    }
+
+    async fn void_spend_authorization(
+        &self,
+        _correlation_id: String,
+        _authorization_id: String,
+    ) -> Result<(), SymphonyError> {
+        Ok(())
     }
 }
 

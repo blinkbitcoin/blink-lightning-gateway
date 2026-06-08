@@ -51,3 +51,11 @@ mockall = "0.13"
 # Used by the integration suite to construct test BOLT11 invoices with
 # known amounts + payment-hashes via `lightning_invoice::InvoiceBuilder`.
 bitcoin = { version = "0.32", features = ["secp-recovery"], default-features = false }
+
+# Dev seed: provisions wl:{wallet_id} Cala accounts via Symphony's
+# EnsureWalletLiabilityAccount before an intraledger transfer posts (ADR-0007,
+# Story 3.2). Path-mapped so it lives under dev/ with the other dev tooling.
+# Run: cargo run --example seed_test_wallets -- <wallet_id> [<wallet_id> ...]
+[[example]]
+name = "seed_test_wallets"
+path = "dev/seed_test_wallets.rs"

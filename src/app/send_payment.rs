@@ -33,6 +33,22 @@ impl App {
 
         let decoded = decode::decode_bolt11(&request.payment_request)?;
 
+        // Intraledger detection (ADR-0007): the gateway owns the receive-side
+        // `invoices` table and is the sole issuer of Blink LN invoices, so a
+        // local invoice for this payment_hash means the destination is a Blink
+        // wallet — route the funds in-ledger, never over LND. `None` falls
+        // through to the LN send path unchanged.
+        if let Some(recipient_invoice) = self
+            .invoices
+            .maybe_find_by_payment_hash(&decoded.payment_hash)
+            .await
+            .map_err(crate::invoice::InvoiceError::from)?
+        {
+            return self
+                .send_intraledger_payment(request, decoded, recipient_invoice, now)
+                .await;
+        }
+
         // Story 2.2 drives only the amount-carrying path; the amountless
         // entrypoint (`lnNoAmountInvoicePaymentSend`) lands in Story 5.1.
         let amount_msat = decoded.amount_msat.ok_or(PaymentError::AmountRequired)?;
@@ -90,6 +106,8 @@ impl App {
                 },
                 sat_amount: hold_sat,
                 idempotency_key: payment_hash.to_hex(),
+                // LN path is the default check-and-hold — no rail metadata.
+                gateway_metadata: serde_json::json!({}),
             })
             .await
         {

@@ -61,6 +61,16 @@ pub enum InvoiceEvent {
     Settled {
         settled_at: Timestamp,
     },
+    /// Settled by an intraledger transfer (`Open → Settled`), NOT by an LND
+    /// HTLC. Distinct from `Settled` (which is `Held → Settled` off a parked
+    /// HTLC) because an intraledger target never reaches `Held`: the sender
+    /// short-circuits LND, so no HTLC parks. Keeping it a separate variant
+    /// lets Story 4.1's status op tell LN-settle from intraledger-settle, and
+    /// carries no accounting (the recipient credit is the credit leg of the
+    /// synchronous transfer journal — ADR-0007).
+    SettledIntraledger {
+        settled_at: Timestamp,
+    },
     Canceled {
         canceled_at: Timestamp,
         reason: CancelReason,

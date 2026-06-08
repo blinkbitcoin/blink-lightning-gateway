@@ -222,6 +222,30 @@ impl Invoice {
         Ok(Idempotent::Executed(()))
     }
 
+    /// `Open → Settled` via an intraledger transfer (galoy's `markAsPaid`,
+    /// `send-lightning.ts:743`). Distinct from [`Self::settle`] (`Held →
+    /// Settled`): an intraledger target never parks an HTLC, so it is settled
+    /// straight from `Open`. Emits NO accounting outbox event — the recipient
+    /// credit is the credit leg of the synchronous transfer journal (ADR-0007).
+    /// Idempotent on a duplicate `SettledIntraledger`; any non-`Open` source
+    /// state surfaces as `InvalidStateTransition`.
+    pub fn settle_intraledger(
+        &mut self,
+        settled_at: Timestamp,
+    ) -> Result<Idempotent<()>, InvoiceError> {
+        idempotency_guard!(self.events.iter_all().rev(), already_applied: InvoiceEvent::SettledIntraledger { .. });
+        if !matches!(self.state, InvoiceState::Open) {
+            return Err(InvoiceError::InvalidStateTransition {
+                from: self.state,
+                attempted: "settle_intraledger",
+            });
+        }
+        self.events
+            .push(InvoiceEvent::SettledIntraledger { settled_at });
+        self.state = InvoiceState::Settled;
+        Ok(Idempotent::Executed(()))
+    }
+
     /// `(Open|Held) → Canceled`. Idempotent on a duplicate `Canceled`
     /// event; a prior `Settled` surfaces as `InvalidStateTransition`.
     pub fn cancel(
@@ -302,7 +326,7 @@ impl TryFromEvents<InvoiceEvent> for Invoice {
                         .state(InvoiceState::Held)
                         .held_amount_msat(Some(*htlc_amount_msat));
                 }
-                InvoiceEvent::Settled { .. } => {
+                InvoiceEvent::Settled { .. } | InvoiceEvent::SettledIntraledger { .. } => {
                     builder = builder.state(InvoiceState::Settled);
                 }
                 InvoiceEvent::Canceled { reason, .. } => {
@@ -557,6 +581,46 @@ mod tests {
     }
 
     #[test]
+    fn settle_intraledger_from_open_executes() {
+        // Intraledger settles straight from Open (no parked HTLC), unlike the
+        // LN `settle()` which requires Held. Guards the distinct transition.
+        let mut inv = fresh_invoice();
+        let outcome = inv.settle_intraledger(fixed_now()).unwrap();
+        assert!(matches!(outcome, Idempotent::Executed(())));
+        assert_eq!(inv.state, InvoiceState::Settled);
+    }
+
+    #[test]
+    fn settle_intraledger_from_held_is_invalid_state_transition() {
+        // A Held invoice has a live LN HTLC mid-flight — it is NOT a valid
+        // intraledger target. `settle()` (Held→Settled) is the path for that.
+        let mut inv = fresh_invoice();
+        push_event(&mut inv, sample_held_event(), InvoiceState::Held);
+        match inv.settle_intraledger(fixed_now()) {
+            Err(InvoiceError::InvalidStateTransition {
+                from: InvoiceState::Held,
+                attempted: "settle_intraledger",
+            }) => {}
+            Err(e) => panic!("expected InvalidStateTransition from Held, got {e:?}"),
+            Ok(_) => panic!("expected InvalidStateTransition from Held, got Ok"),
+        }
+    }
+
+    #[test]
+    fn settle_intraledger_from_settled_intraledger_is_idempotent() {
+        let mut inv = fresh_invoice();
+        push_event(
+            &mut inv,
+            InvoiceEvent::SettledIntraledger {
+                settled_at: fixed_now(),
+            },
+            InvoiceState::Settled,
+        );
+        let outcome = inv.settle_intraledger(fixed_now()).unwrap();
+        assert!(matches!(outcome, Idempotent::AlreadyApplied));
+    }
+
+    #[test]
     fn cancel_from_open_executes() {
         let mut inv = fresh_invoice();
         let outcome = inv.cancel(CancelReason::Expired, fixed_now()).unwrap();
@@ -720,6 +784,40 @@ mod tests {
         let invoice = Invoice::try_from_events(events).unwrap();
         assert_eq!(invoice.state, InvoiceState::Settled);
         assert_eq!(invoice.payment_preimage, pre);
+    }
+
+    #[test]
+    fn try_from_events_reconstructs_intraledger_settled_invoice() {
+        // Fold over Created → SettledIntraledger (no HtlcHeld in between):
+        // hydration must reach `Settled` from the intraledger event so a
+        // restart sees the recipient invoice as paid.
+        let (h, pre, w, a, e, b) = ok_args();
+        let new =
+            NewInvoice::try_new(h, pre, w, a, e, b, "ext-id".to_owned(), fixed_now()).unwrap();
+        let id = new.id;
+        let events = EntityEvents::init(
+            id,
+            [
+                InvoiceEvent::Created {
+                    payment_hash: h,
+                    payment_preimage: pre,
+                    wallet_id: w,
+                    amount_msat: a,
+                    expiry_at: Timestamp::from(
+                        fixed_now().into_inner() + chrono::Duration::seconds(i64::from(e)),
+                    ),
+                    bolt_invoice: BoltInvoice::new("lnbc1u1pj..."),
+                    external_id: "ext-id".to_owned(),
+                    created_at: fixed_now(),
+                },
+                InvoiceEvent::SettledIntraledger {
+                    settled_at: fixed_now(),
+                },
+            ],
+        );
+        let invoice = Invoice::try_from_events(events).unwrap();
+        assert_eq!(invoice.state, InvoiceState::Settled);
+        assert!(invoice.held_amount_msat.is_none());
     }
 
     #[test]

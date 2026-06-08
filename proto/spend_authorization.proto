@@ -16,6 +16,11 @@ service SpendAuthorizationService {
   rpc AuthorizeSpend(SpendAuthorizeRequest) returns (SpendAuthorizeResponse);
   rpc SettleSpendAuthorization(SpendSettleRequest) returns (SpendSettleResponse);
   rpc VoidSpendAuthorization(SpendVoidRequest) returns (SpendVoidResponse);
+  // EnsureWalletLiabilityAccount idempotently create-or-returns the
+  // wl:{wallet_id} Cala account (ADR-0007). The dev seed script
+  // (dev/seed_test_wallets.rs) calls this so both wallets' wl: accounts exist
+  // before an intraledger transfer's credit leg posts.
+  rpc EnsureWalletLiabilityAccount(EnsureWalletLiabilityAccountRequest) returns (WalletLiabilityAccount);
 }
 
 message SpendAuthorizeRequest {
@@ -23,6 +28,13 @@ message SpendAuthorizeRequest {
   AccountRef account = 2;
   int64 sat_amount = 3;          // amount + max_fee, > 0
   string idempotency_key = 4;    // == correlation_id; kept distinct for future divergence
+  // Generic, gateway-agnostic key/value bag, carried as a JSON-object string.
+  // Symphony interprets per-gateway nuance without rail-specific typed fields
+  // (ADR-0007). The LN gateway sets
+  // {"intraledger":true,"recipient_wallet_id":"<uuid>"} to request the
+  // settle-inline two-leg transfer (debit sender, credit recipient,
+  // posted SETTLED in this one call) instead of the default check-and-hold.
+  string gateway_metadata = 5;
 }
 
 message AccountRef {
@@ -74,4 +86,15 @@ message SpendVoidResponse {
   bool success = 1;
   string void_id = 2;
   int64 released_sat_amount = 3;
+}
+
+message EnsureWalletLiabilityAccountRequest {
+  string correlation_id = 1;
+  string wallet_id = 2;          // Blink wallet ID; account code is wl:{wallet_id}
+}
+
+message WalletLiabilityAccount {
+  string account_id = 1;         // Cala account UUID (UUIDv5 over wl:{wallet_id})
+  string account_code = 2;       // wl:{wallet_id}
+  string created_at = 3;
 }

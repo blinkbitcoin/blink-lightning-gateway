@@ -104,6 +104,13 @@ pub enum GatewayDomainEvent {
     LightningPaymentCompleted,
     LightningPaymentFailed,
     LightningPaymentReversed,
+    /// Intraledger (wallet-to-wallet, no LND) transfer completed. Reporting
+    /// only — the accounting was already posted synchronously by
+    /// `AuthorizeSpend(intraledger=true)`, so Symphony's consumer skips
+    /// accounting for it (ADR-0007). Maps to the existing standardized
+    /// `OutgoingPaymentCompleted`; the `intraledger` flag lives in
+    /// `gateway_metadata`, not a new standardized variant.
+    LightningIntraledgerTransferCompleted,
 }
 
 impl GatewayDomainEvent {
@@ -116,6 +123,9 @@ impl GatewayDomainEvent {
             Self::LightningPaymentCompleted => "lightning_payment_completed",
             Self::LightningPaymentFailed => "lightning_payment_failed",
             Self::LightningPaymentReversed => "lightning_payment_reversed",
+            Self::LightningIntraledgerTransferCompleted => {
+                "lightning_intraledger_transfer_completed"
+            }
         }
     }
 
@@ -129,6 +139,11 @@ impl GatewayDomainEvent {
             Self::LightningPaymentCompleted => GatewayEventType::OutgoingPaymentCompleted,
             Self::LightningPaymentFailed => GatewayEventType::OutgoingPaymentFailed,
             Self::LightningPaymentReversed => GatewayEventType::OutgoingPaymentReversed,
+            // Sender-side classification is "outgoing payment completed"; the
+            // intraledger nuance rides in `gateway_metadata` (ADR-0007).
+            Self::LightningIntraledgerTransferCompleted => {
+                GatewayEventType::OutgoingPaymentCompleted
+            }
         }
     }
 }
@@ -150,6 +165,9 @@ impl FromStr for GatewayDomainEvent {
             "lightning_payment_completed" => Ok(Self::LightningPaymentCompleted),
             "lightning_payment_failed" => Ok(Self::LightningPaymentFailed),
             "lightning_payment_reversed" => Ok(Self::LightningPaymentReversed),
+            "lightning_intraledger_transfer_completed" => {
+                Ok(Self::LightningIntraledgerTransferCompleted)
+            }
             other => Err(OutboxError::UnknownEventType(other.to_owned())),
         }
     }
@@ -350,6 +368,31 @@ impl NewOutboxEvent {
         )
     }
 
+    /// Construct a `LightningIntraledgerTransferCompleted` outbox row. Fires
+    /// after a wallet-to-wallet transfer is posted SETTLED synchronously by
+    /// `AuthorizeSpend(intraledger=true)` (ADR-0007). Maps to
+    /// `OutgoingPaymentCompleted`. **Reporting only** — it drives the
+    /// payment-completed notification (and the Story 4.1 subscription op),
+    /// NOT a Cala posting; Symphony's consumer must skip accounting for it.
+    /// `gateway_metadata` carries `intraledger`, both wallet IDs, and
+    /// `amount_msat`.
+    pub fn for_lightning_intraledger_transfer_completed(
+        correlation_id: impl Into<String>,
+        payment_hash_hex: impl Into<String>,
+        amount_sat: i64,
+        timestamp: DateTime<Utc>,
+        gateway_metadata: serde_json::Value,
+    ) -> Self {
+        Self::new(
+            GatewayDomainEvent::LightningIntraledgerTransferCompleted,
+            correlation_id,
+            payment_hash_hex,
+            amount_sat,
+            timestamp,
+            gateway_metadata,
+        )
+    }
+
     /// Construct a `LightningInvoiceCanceled` outbox row. Fires on
     /// LND `is_canceled`. Maps to `IncomingPaymentCanceled`.
     pub fn for_lightning_invoice_canceled(
@@ -390,6 +433,13 @@ mod tests {
             (D::LightningPaymentCompleted, T::OutgoingPaymentCompleted),
             (D::LightningPaymentFailed, T::OutgoingPaymentFailed),
             (D::LightningPaymentReversed, T::OutgoingPaymentReversed),
+            // Intraledger maps onto the existing OutgoingPaymentCompleted —
+            // no 9th standardized variant. A regression that minted a new
+            // standardized type (forcing a proto deploy) would fail here.
+            (
+                D::LightningIntraledgerTransferCompleted,
+                T::OutgoingPaymentCompleted,
+            ),
         ];
         for (domain, expected) in cases {
             assert_eq!(domain.to_standardized(), expected, "domain={domain:?}");
@@ -415,6 +465,7 @@ mod tests {
             GatewayDomainEvent::LightningPaymentCompleted,
             GatewayDomainEvent::LightningPaymentFailed,
             GatewayDomainEvent::LightningPaymentReversed,
+            GatewayDomainEvent::LightningIntraledgerTransferCompleted,
         ] {
             let s = variant.to_string();
             let back: GatewayDomainEvent = s.parse().unwrap();

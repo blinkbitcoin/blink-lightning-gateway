@@ -60,10 +60,17 @@ pub struct SymphonyAuthorizeRequest {
     /// Trace correlation (== `payment_hash` hex, ADR-0002).
     pub correlation_id: String,
     pub account: AccountRef,
-    /// Amount to authorize, satoshis (`amount + max_fee`, > 0).
+    /// Amount to authorize, satoshis. LN hold: `amount + max_fee`.
+    /// Intraledger settle-inline: `amount` only (zero-fee, ADR-0007).
     pub sat_amount: u64,
     /// Idempotency key (== `payment_hash` hex, ADR-0002).
     pub idempotency_key: String,
+    /// Generic, gateway-agnostic metadata Symphony interprets (ADR-0007).
+    /// Empty (`{}`) for the default check-and-hold LN path; the intraledger
+    /// path sets `{"intraledger":true,"recipient_wallet_id":...}` to request
+    /// the settle-inline two-leg transfer. Kept rail-neutral on purpose — no
+    /// LN-specific typed fields on the shared spend primitive.
+    pub gateway_metadata: serde_json::Value,
 }
 
 #[derive(Clone, Debug)]
@@ -196,6 +203,10 @@ impl SymphonyClient for LightningSymphonyClient {
             }),
             sat_amount: request.sat_amount as i64,
             idempotency_key: request.idempotency_key,
+            // Serialize the rail-neutral bag to a JSON-object string. A
+            // serialization failure falls back to `{}` — never a panic.
+            gateway_metadata: serde_json::to_string(&request.gateway_metadata)
+                .unwrap_or_else(|_| "{}".to_owned()),
         };
         let resp = client.authorize_spend(proto_req).await?.into_inner();
         if resp.authorized {
@@ -335,6 +346,7 @@ mod tests {
                 },
                 sat_amount: 1,
                 idempotency_key: "c".to_owned(),
+                gateway_metadata: serde_json::json!({}),
             })
             .await
             .unwrap_err();

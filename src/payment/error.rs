@@ -33,6 +33,15 @@ pub enum PaymentError {
     #[error("payment already exists for payment_hash {payment_hash}")]
     AlreadyPaid { payment_hash: String },
 
+    #[error("cannot pay an invoice issued for your own wallet (intraledger self-payment)")]
+    SelfPayment,
+
+    #[error("recipient invoice was canceled and is no longer payable")]
+    RecipientInvoiceCanceled,
+
+    #[error("recipient invoice has a payment in progress")]
+    RecipientInvoiceInProgress,
+
     #[error("invalid state transition from {from} attempting {attempted}")]
     InvalidStateTransition {
         from: PaymentState,
