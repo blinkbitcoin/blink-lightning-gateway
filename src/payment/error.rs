@@ -18,6 +18,11 @@ pub enum PaymentError {
     #[error("amount overspecified — invoice already commits an amount; supply none")]
     AmountOverspecified,
 
+    #[error(
+        "amount mismatch — the requested amount does not match the invoice's committed amount"
+    )]
+    AmountMismatch,
+
     #[error("invalid max_fee_msat — must be > 0")]
     InvalidMaxFee,
 
@@ -41,6 +46,9 @@ pub enum PaymentError {
 
     #[error("recipient invoice has a payment in progress")]
     RecipientInvoiceInProgress,
+
+    #[error("recipient invoice has expired and is no longer payable")]
+    RecipientInvoiceExpired,
 
     #[error("invalid state transition from {from} attempting {attempted}")]
     InvalidStateTransition {

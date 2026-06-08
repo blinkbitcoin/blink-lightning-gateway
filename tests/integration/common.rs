@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use blink_lightning_gateway::primitives::WalletId;
 use blink_lightning_gateway::symphony::{
-    SymphonyAuthorizeRequest, SymphonyAuthorizeResponse, SymphonyAuthorizeStatus, SymphonyClient,
-    SymphonyError,
+    DeclineReason, SymphonyAuthorizeRequest, SymphonyAuthorizeResponse, SymphonyAuthorizeStatus,
+    SymphonyClient, SymphonyError,
 };
 use blink_lightning_gateway::wallet::{CallerAuth, WalletOwnershipChecker, WalletOwnershipError};
 use sqlx::postgres::PgPoolOptions;
@@ -52,24 +52,41 @@ impl WalletOwnershipChecker for CannedWalletOwnership {
     }
 }
 
-/// Symphony stub that approves every `authorize_spend` and CAPTURES each
-/// request, so a test can assert the request shape (`sat_amount`,
-/// `gateway_metadata`). Story 3.1's `boot_stub` only covers the fail-closed
-/// decline path; the intraledger happy path needs approve + capture. Integration
-/// tests can't see the lib's `automock` mocks, so it's hand-written per CLAUDE.md.
+/// Symphony stub that CAPTURES each `authorize_spend` request (so a test can
+/// assert the request shape — `sat_amount`, `gateway_metadata`) and either
+/// approves or declines them all. Story 3.1's `boot_stub` only covers the
+/// fail-closed decline path; the intraledger happy path needs approve +
+/// capture, and the intraledger fail-closed test needs decline + capture.
+/// Integration tests can't see the lib's `automock` mocks, so it's hand-written
+/// per CLAUDE.md.
 #[derive(Clone, Default)]
 pub struct RecordingSymphony {
     pub requests: Arc<tokio::sync::Mutex<Vec<SymphonyAuthorizeRequest>>>,
+    decline: bool,
 }
 
 impl RecordingSymphony {
-    /// `(client, captured-requests)`. The handle is shared with the returned
-    /// `Arc<dyn SymphonyClient>`, so assertions read the same `Vec`.
+    /// `(client, captured-requests)` that approves every spend. The handle is
+    /// shared with the returned `Arc<dyn SymphonyClient>`, so assertions read
+    /// the same `Vec`.
     pub fn approving() -> (
         Arc<dyn SymphonyClient>,
         Arc<tokio::sync::Mutex<Vec<SymphonyAuthorizeRequest>>>,
     ) {
         let me = Self::default();
+        let requests = me.requests.clone();
+        (Arc::new(me), requests)
+    }
+
+    /// Same, but DECLINES every spend — for the fail-closed path (AC7).
+    pub fn declining() -> (
+        Arc<dyn SymphonyClient>,
+        Arc<tokio::sync::Mutex<Vec<SymphonyAuthorizeRequest>>>,
+    ) {
+        let me = Self {
+            decline: true,
+            ..Self::default()
+        };
         let requests = me.requests.clone();
         (Arc::new(me), requests)
     }
@@ -83,6 +100,13 @@ impl SymphonyClient for RecordingSymphony {
     ) -> Result<SymphonyAuthorizeResponse, SymphonyError> {
         let authorization_id = request.correlation_id.clone();
         self.requests.lock().await.push(request);
+        if self.decline {
+            return Ok(SymphonyAuthorizeResponse {
+                status: SymphonyAuthorizeStatus::Declined,
+                authorization_id: None,
+                decline_reason: Some(DeclineReason::InsufficientFunds),
+            });
+        }
         Ok(SymphonyAuthorizeResponse {
             status: SymphonyAuthorizeStatus::Approved,
             authorization_id: Some(authorization_id),

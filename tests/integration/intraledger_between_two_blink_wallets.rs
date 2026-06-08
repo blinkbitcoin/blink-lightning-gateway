@@ -351,3 +351,75 @@ async fn intraledger_already_settled_recipient_is_rejected() {
         "LND must never be called on the intraledger path"
     );
 }
+
+#[tokio::test]
+async fn intraledger_authorize_declined_fails_closed() {
+    // AC7 fail-closed: a Declined AuthorizeSpend must leave the world untouched
+    // — LND never called (no send, no cancel), recipient invoice still Open, no
+    // Payment recorded, no outbox event. The only state change is the (declined)
+    // authorize attempt itself.
+    let db = TestDatabase::new().await.expect("test db");
+    let pool = db.pool.clone();
+    let lnd = IntraledgerLnd::default();
+    let send_called = lnd.send_called.clone();
+    let canceled = lnd.canceled.clone();
+    let (symphony, captured) = RecordingSymphony::declining();
+    let app = build_app(pool.clone(), Arc::new(lnd), symphony);
+
+    let sender = WalletId::from(Uuid::now_v7());
+    let recipient = WalletId::from(Uuid::now_v7());
+
+    let recipient_invoice = app
+        .create_invoice(invoice_req(recipient))
+        .await
+        .expect("create recipient invoice");
+    let payment_hash = recipient_invoice.payment_hash;
+
+    let err = app
+        .send_payment(send_req(
+            sender,
+            recipient_invoice.bolt_invoice.as_str().to_owned(),
+        ))
+        .await
+        .expect_err("declined AuthorizeSpend must fail the transfer");
+    assert!(
+        matches!(err, AppError::Symphony(_)),
+        "expected a Symphony decline error, got {err:?}"
+    );
+
+    // The authorize attempt happened exactly once and was the ONLY side effect.
+    assert_eq!(captured.lock().await.len(), 1, "one AuthorizeSpend attempt");
+    assert!(
+        !send_called.load(Ordering::SeqCst),
+        "LND send_payment must not be called when the spend is declined"
+    );
+    assert!(
+        canceled.lock().unwrap().is_empty(),
+        "recipient LND invoice must not be canceled when the spend is declined"
+    );
+
+    // Recipient invoice stays Open; no Payment intent; no outbox event.
+    let invoice = app
+        .invoices()
+        .find_by_payment_hash(&payment_hash)
+        .await
+        .expect("reload invoice");
+    assert_eq!(
+        invoice.state,
+        InvoiceState::Open,
+        "recipient invoice must stay Open on a declined transfer"
+    );
+    let (payment_event_rows,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM payment_events")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        payment_event_rows, 0,
+        "no Payment recorded on a declined transfer"
+    );
+    let (outbox_rows,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM outbox_events")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(outbox_rows, 0, "no outbox event on a declined transfer");
+}

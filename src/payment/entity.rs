@@ -136,18 +136,39 @@ impl NewPayment {
     /// Intraledger transfer constructor. Unlike [`Self::try_new`], the
     /// `max_fee_msat > 0` check does not apply: intraledger is zero-fee
     /// (galoy `LnFees().intraLedgerFees()` → `{ btc: ZERO, usd: ZERO }`,
-    /// `ln-fees.ts:37-42`), so the field is `ZERO`. Amount-carrying only —
-    /// an amountless invoice yields `AmountRequired` (amountless intraledger
-    /// is Story 5.1). The transfer is posted synchronously by `AuthorizeSpend`
-    /// and the `Payment` is created already terminal (`settle` from
-    /// `Initiated`), so it never sits in `initiated` for the orphan-hold
-    /// sweep to see (ADR-0007).
+    /// `ln-fees.ts:37-42`), so the field is `ZERO`. The transfer is posted
+    /// synchronously by `AuthorizeSpend` and the `Payment` is created already
+    /// terminal (`settle` from `Initiated`), so it never sits in `initiated`
+    /// for the orphan-hold sweep to see (ADR-0007).
+    ///
+    /// `invoice_amount_msat` is the recipient invoice's committed amount and is
+    /// authoritative; `None` means an amountless recipient invoice.
     pub fn try_new_intraledger(
         decoded: DecodedInvoice,
+        invoice_amount_msat: Option<MilliSatoshi>,
         wallet_id: WalletId,
         initiated_at: Timestamp,
     ) -> Result<Self, PaymentError> {
-        let amount_msat = decoded.amount_msat.ok_or(PaymentError::AmountRequired)?;
+        // The recipient invoice's committed amount is authoritative — never the
+        // sender-carried BOLT11's. The sender supplies `payment_request` in the
+        // request, so a re-signed invoice reusing this payment_hash must not be
+        // able to change the amount (it would otherwise underpay a fixed-amount
+        // invoice); a divergent decoded amount fails closed (ADR-0007 / code
+        // review 2026-06-08). `decoded.amount_msat` is already whole-sat-rounded
+        // (decode.rs) and the caller normalizes `invoice_amount_msat` the same
+        // way, so the comparison is exact. An amountless recipient invoice has
+        // no committed amount, so the sender's amount stands (amountless
+        // intraledger is Story 5.1; until then `None` decoded → `AmountRequired`).
+        let amount_msat = match invoice_amount_msat {
+            Some(invoice_amount) => {
+                if matches!(decoded.amount_msat, Some(sender_amount) if sender_amount != invoice_amount)
+                {
+                    return Err(PaymentError::AmountMismatch);
+                }
+                invoice_amount
+            }
+            None => decoded.amount_msat.ok_or(PaymentError::AmountRequired)?,
+        };
         if amount_msat.as_u64() == 0 {
             return Err(PaymentError::InvalidAmount);
         }
@@ -548,6 +569,7 @@ mod tests {
         // the intraledger path starts charging a max-fee budget.
         let new = NewPayment::try_new_intraledger(
             ok_decoded(),
+            Some(MilliSatoshi::new(1_000_000)),
             WalletId::from(Uuid::now_v7()),
             fixed_now(),
         )
@@ -558,15 +580,34 @@ mod tests {
 
     #[test]
     fn try_new_intraledger_amountless_is_amount_required() {
-        // Amountless intraledger is out of scope (Story 5.1); the constructor
-        // rejects it rather than silently defaulting an amount.
+        // Amountless intraledger is out of scope (Story 5.1); with no committed
+        // invoice amount and no decoded amount, the constructor rejects rather
+        // than silently defaulting an amount.
         let err = NewPayment::try_new_intraledger(
             amountless_decoded(),
+            None,
             WalletId::from(Uuid::now_v7()),
             fixed_now(),
         )
         .unwrap_err();
         assert!(matches!(err, PaymentError::AmountRequired));
+    }
+
+    #[test]
+    fn try_new_intraledger_rejects_sender_amount_below_invoice() {
+        // Fund-safety (ADR-0007 / code review 2026-06-08): the sender carries
+        // the BOLT11 in the request, so a re-signed invoice reusing the
+        // payment_hash could try to underpay a fixed-amount invoice. The
+        // recipient invoice's committed amount is authoritative — a divergent
+        // decoded amount must fail closed, never silently settle for less.
+        let err = NewPayment::try_new_intraledger(
+            ok_decoded(),                       // sender-carried BOLT11 says 1_000_000 msat
+            Some(MilliSatoshi::new(2_000_000)), // invoice actually committed 2_000_000
+            WalletId::from(Uuid::now_v7()),
+            fixed_now(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, PaymentError::AmountMismatch));
     }
 
     fn fresh_payment() -> Payment {

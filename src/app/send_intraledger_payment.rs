@@ -59,7 +59,16 @@ impl App {
         // an Open recipient invoice is a valid intraledger target. None of
         // these branches call LND.
         match recipient_invoice.state {
-            InvoiceState::Open => {}
+            InvoiceState::Open => {
+                // Reject an Open-but-expired invoice (galoy rejects expired
+                // invoices). decode.rs's expiry guard only checks the
+                // sender-submitted BOLT11; the invoice WE issued is the
+                // authority, and the reconciliation that flips Open→Canceled at
+                // expiry can lag. LND is never called.
+                if now >= recipient_invoice.expiry_at {
+                    return Err(PaymentError::RecipientInvoiceExpired.into());
+                }
+            }
             InvoiceState::Settled => {
                 return Err(PaymentError::AlreadyPaid {
                     payment_hash: payment_hash.to_hex(),
@@ -75,9 +84,19 @@ impl App {
         // terminal `Completed`, even though it is never revealed on the wire.
         let recipient_preimage = recipient_invoice.payment_preimage;
 
-        // Build the (zero-fee) Payment intent up front so an amountless
-        // invoice fails fast (AmountRequired) before anything is authorized.
-        let new_payment = NewPayment::try_new_intraledger(decoded, sender_wallet_id, now)?;
+        // Build the (zero-fee) Payment intent up front so amount/guard errors
+        // fail fast before anything is authorized. The recipient invoice's own
+        // committed amount is authoritative — never the sender-carried BOLT11's
+        // (Option B, code review 2026-06-08): a re-signed invoice reusing this
+        // payment_hash must not be able to underpay a fixed-amount invoice.
+        let new_payment = NewPayment::try_new_intraledger(
+            decoded,
+            recipient_invoice
+                .amount_msat
+                .map(MilliSatoshi::round_up_to_sat),
+            sender_wallet_id,
+            now,
+        )?;
         let amount_msat = new_payment.amount_msat;
         let amount_sat = amount_msat.whole_sat() as i64;
 
