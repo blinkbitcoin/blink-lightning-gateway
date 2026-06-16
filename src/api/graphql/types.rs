@@ -321,3 +321,87 @@ impl SatAmountPayload {
         &self.errors
     }
 }
+
+// ---------------------------------------------------------------------------
+// Invoice payment-status subscription types (Slice 6) — galoy parity.
+// SDL must match `blink/core/api/src/graphql/public/schema.graphql`
+// byte-for-byte (Story 5.1 diffs against galoy's SDL): enum :597-601,
+// inputs :694-704, payload :706-712. No `CANCELLED` value — an LN
+// cancellation surfaces on the wire as `EXPIRED` (ADR-0008).
+// ---------------------------------------------------------------------------
+
+/// Wire status of an invoice. `Canceled` (gateway-internal) maps to
+/// `EXPIRED`; there is deliberately no `CANCELLED` value (galoy parity).
+/// async-graphql screaming-snake-cases the variants, so these render as
+/// `EXPIRED | PAID | PENDING`.
+#[derive(Enum, Copy, Clone, Eq, PartialEq, Debug)]
+#[graphql(name = "InvoicePaymentStatus")]
+pub enum InvoicePaymentStatus {
+    Expired,
+    Paid,
+    Pending,
+}
+
+/// BOLT11 payment preimage (32-byte preimage, hex-encoded). Modeled on
+/// the `LnPaymentSecret` scalar; galoy's `paymentPreimage` field type.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LnPaymentPreImage(pub String);
+
+#[Scalar(name = "LnPaymentPreImage")]
+impl ScalarType for LnPaymentPreImage {
+    fn parse(value: Value) -> InputValueResult<Self> {
+        match value {
+            Value::String(s) => Ok(LnPaymentPreImage(s)),
+            other => Err(InputValueError::expected_type(other)),
+        }
+    }
+    fn to_value(&self) -> Value {
+        Value::String(self.0.clone())
+    }
+}
+
+#[derive(InputObject)]
+#[graphql(name = "LnInvoicePaymentStatusByHashInput")]
+pub struct LnInvoicePaymentStatusByHashInput {
+    pub payment_hash: PaymentHash,
+}
+
+#[derive(InputObject)]
+#[graphql(name = "LnInvoicePaymentStatusByPaymentRequestInput")]
+pub struct LnInvoicePaymentStatusByPaymentRequestInput {
+    pub payment_request: LnPaymentRequest,
+}
+
+#[derive(InputObject)]
+#[graphql(name = "LnInvoicePaymentStatusInput")]
+pub struct LnInvoicePaymentStatusInput {
+    pub payment_request: LnPaymentRequest,
+}
+
+/// All fields `Option` exactly as galoy (`schema.graphql:706-712`).
+pub struct LnInvoicePaymentStatusPayload {
+    pub errors: Vec<GraphqlError>,
+    pub payment_hash: Option<PaymentHash>,
+    pub payment_preimage: Option<LnPaymentPreImage>,
+    pub payment_request: Option<LnPaymentRequest>,
+    pub status: Option<InvoicePaymentStatus>,
+}
+
+#[Object(name = "LnInvoicePaymentStatusPayload")]
+impl LnInvoicePaymentStatusPayload {
+    async fn errors(&self) -> &[GraphqlError] {
+        &self.errors
+    }
+    async fn payment_hash(&self) -> Option<&PaymentHash> {
+        self.payment_hash.as_ref()
+    }
+    async fn payment_preimage(&self) -> Option<&LnPaymentPreImage> {
+        self.payment_preimage.as_ref()
+    }
+    async fn payment_request(&self) -> Option<&LnPaymentRequest> {
+        self.payment_request.as_ref()
+    }
+    async fn status(&self) -> Option<InvoicePaymentStatus> {
+        self.status
+    }
+}

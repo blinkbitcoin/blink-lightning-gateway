@@ -156,8 +156,12 @@ async fn server_lifecycle_drains_in_flight_subscribers_on_cancel() {
         crate::common::CannedWalletOwnership::allow(),
         InvoiceUpdateDispatcher::for_test(),
     );
+    // `pg_config` is required now that the subgraph server builds the
+    // subscription `OutboxFanout` (its single `LISTEN`), the same way the
+    // gRPC server above is given the connection string.
     let graphql_config = SubgraphServerConfig {
         port: graphql_port,
+        pg_config: db.url.clone(),
         ..SubgraphServerConfig::default()
     };
     let graphql_cancel = cancel.clone();

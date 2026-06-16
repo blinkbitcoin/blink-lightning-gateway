@@ -252,7 +252,8 @@ async fn run_cmd(config: Config) -> anyhow::Result<()> {
         let send = send.clone();
         let app = app.clone();
         let cancel = cancel.clone();
-        let graphql_config = config.subgraph_server.clone();
+        let mut graphql_config = config.subgraph_server.clone();
+        graphql_config.pg_config = config.db.pg_con.clone();
         info!("Starting blink-lightning-gateway GraphQL subgraph server");
         handles.push(tokio::spawn(async move {
             let result = crate::server::run_graphql_server(graphql_config, app, cancel)

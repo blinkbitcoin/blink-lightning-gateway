@@ -18,3 +18,4 @@ mod payment_repo;
 mod payment_send_happy_path;
 mod server_lifecycle;
 mod spend_path_authorization;
+mod subscription_invoice_status;

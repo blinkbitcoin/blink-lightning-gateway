@@ -13,8 +13,9 @@ use tokio_util::sync::CancellationToken;
 
 use ::tracing::{info, warn};
 
-use crate::api::graphql::{build_schema, GatewaySchema};
+use crate::api::graphql::{build_schema_with_fanout, GatewaySchema};
 use crate::app::App;
+use crate::outbox::{EventPublisher, ListenConnection, OutboxFanout};
 use crate::server::config::SubgraphServerConfig;
 use crate::server::error::ServerError;
 use crate::server::jwks::RemoteJwksDecoder;
@@ -54,7 +55,16 @@ pub async fn run_graphql_server(
     app: App,
     cancel: CancellationToken,
 ) -> Result<(), ServerError> {
-    let schema = build_schema(app);
+    // One in-process outbox fanout feeds every GraphQL subscriber from a
+    // single `LISTEN` (ADR-0008). It reuses the same backfill machinery as
+    // the gRPC pump; the pg connection string is threaded in separately
+    // because the LISTEN side uses `tokio_postgres`, not the sqlx pool.
+    let fanout = OutboxFanout::start(
+        EventPublisher::new(app.pool()),
+        ListenConnection::new(config.pg_config.clone()),
+        cancel.clone(),
+    )?;
+    let schema = build_schema_with_fanout(app, fanout);
 
     let decoder = Arc::new(RemoteJwksDecoder::new(config.jwks_url.clone()));
     {

@@ -9,6 +9,14 @@ pub struct SubgraphServerConfig {
     pub port: u16,
     #[serde(default = "default_jwks_url")]
     pub jwks_url: String,
+    /// PostgreSQL connection string for the `OutboxFanout`'s single
+    /// `LISTEN gateway_events` ingest (used by the `lnInvoicePaymentStatus*`
+    /// subscriptions). The CLI copies `db.pg_con` into this field before
+    /// passing to `run_graphql_server`, the same way `GrpcServerConfig` is
+    /// handled — sqlx's pool doesn't expose its config and the LISTEN side
+    /// uses `tokio_postgres`.
+    #[serde(default)]
+    pub pg_config: String,
 }
 
 impl Default for SubgraphServerConfig {
@@ -16,6 +24,7 @@ impl Default for SubgraphServerConfig {
         Self {
             port: default_graphql_port(),
             jwks_url: default_jwks_url(),
+            pg_config: String::new(),
         }
     }
 }
