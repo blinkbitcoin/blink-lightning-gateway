@@ -5,6 +5,12 @@ type GraphqlError {
 	message: String!
 }
 
+enum InvoicePaymentStatus {
+	EXPIRED
+	PAID
+	PENDING
+}
+
 type LnInvoice {
 	paymentHash: PaymentHash!
 	paymentRequest: LnPaymentRequest!
@@ -47,6 +53,28 @@ input LnInvoicePaymentInput {
 	paymentRequest: LnPaymentRequest!
 	walletId: WalletId!
 }
+
+input LnInvoicePaymentStatusByHashInput {
+	paymentHash: PaymentHash!
+}
+
+input LnInvoicePaymentStatusByPaymentRequestInput {
+	paymentRequest: LnPaymentRequest!
+}
+
+input LnInvoicePaymentStatusInput {
+	paymentRequest: LnPaymentRequest!
+}
+
+type LnInvoicePaymentStatusPayload {
+	errors: [GraphqlError!]!
+	paymentHash: PaymentHash
+	paymentPreimage: LnPaymentPreImage
+	paymentRequest: LnPaymentRequest
+	status: InvoicePaymentStatus
+}
+
+scalar LnPaymentPreImage
 
 scalar LnPaymentRequest
 
@@ -96,6 +124,12 @@ type SatAmountPayload {
 	errors: [GraphqlError!]!
 }
 
+type Subscription {
+	lnInvoicePaymentStatus(input: LnInvoicePaymentStatusInput!): LnInvoicePaymentStatusPayload! @deprecated(reason: "Deprecated in favor of lnInvoicePaymentStatusByPaymentRequest")
+	lnInvoicePaymentStatusByHash(input: LnInvoicePaymentStatusByHashInput!): LnInvoicePaymentStatusPayload!
+	lnInvoicePaymentStatusByPaymentRequest(input: LnInvoicePaymentStatusByPaymentRequestInput!): LnInvoicePaymentStatusPayload!
+}
+
 """
 Settled transaction record.
 """
@@ -118,6 +152,10 @@ type _Service {
 }
 
 """
+Marks an element of a GraphQL schema as no longer supported.
+"""
+directive @deprecated(reason: String = "No longer supported") on FIELD_DEFINITION | ARGUMENT_DEFINITION | INPUT_FIELD_DEFINITION | ENUM_VALUE
+"""
 Directs the executor to include this field or fragment only when the `if` argument is true.
 """
 directive @include(if: Boolean!) on FIELD | FRAGMENT_SPREAD | INLINE_FRAGMENT
@@ -128,5 +166,6 @@ directive @skip(if: Boolean!) on FIELD | FRAGMENT_SPREAD | INLINE_FRAGMENT
 schema {
 	query: Query
 	mutation: Mutation
+	subscription: Subscription
 }
 

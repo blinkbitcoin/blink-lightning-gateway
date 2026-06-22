@@ -56,7 +56,7 @@ pub async fn run_graphql_server(
     cancel: CancellationToken,
 ) -> Result<(), ServerError> {
     // One in-process outbox fanout feeds every GraphQL subscriber from a
-    // single `LISTEN` (ADR-0008). It reuses the same backfill machinery as
+    // single `LISTEN`. It reuses the same backfill machinery as
     // the gRPC pump; the pg connection string is threaded in separately
     // because the LISTEN side uses `tokio_postgres`, not the sqlx pool.
     let fanout = OutboxFanout::start(

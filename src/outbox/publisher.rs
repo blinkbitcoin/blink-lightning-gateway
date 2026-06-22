@@ -1,10 +1,4 @@
 //! `EventPublisher::publish_in_tx` — the slice's only outbox-write path.
-//!
-//! Re-derived from `blink-card/src/outbox/repository.rs:64-100` (`insert_in_tx`)
-//! minus the `webhook_id`-based `ON CONFLICT` (LN has no webhook ingress —
-//! see `migrations/<TS>_outbox_events.sql` for the rationale). The pg
-//! trigger `outbox_events_notify` fires `pg_notify('gateway_events',
-//! sequence::text)` after every insert.
 
 use sqlx::{PgPool, Postgres, Transaction};
 

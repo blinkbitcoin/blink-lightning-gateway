@@ -1,23 +1,17 @@
 //! `Subscription` root — the client-facing `lnInvoicePaymentStatus*` ops.
 //!
-//! Contract is galoy, byte-identical (Story 5.1 diffs the SDL); mechanism is
-//! bria. On subscribe the resolver emits the invoice's CURRENT status from
-//! the aggregate (galoy semantics), then live-tails the outbox filtered to
-//! one invoice by `reference_id == payment_hash` (ADR-0008). It is fed by the
-//! in-process [`OutboxFanout`] (one shared `LISTEN`, broadcast to N
-//! subscribers) plus `EventPublisher` backfill — the same backfill-then-
-//! live-tail shape as the gRPC `subscription_loop`. The stream is resumable
-//! by sequence: a `ResumeSequence` in request data gap-fills outbox rows past
-//! the client's last-acked sequence instead of re-emitting initial status
-//! (mirrors FR5 at-least-once). Statuses dedup on consecutive repeats;
-//! `PAID`/`EXPIRED` are terminal and complete the stream.
+//! On subscribe the resolver emits the invoice's current status, then streams
+//! later transitions until it is paid or expired. Events come from the
+//! gateway's outbox via a shared [`OutboxFanout`] feed (plus `EventPublisher`
+//! backfill), filtered to one invoice by `reference_id`. Repeated statuses are
+//! suppressed; `PAID`/`EXPIRED` end the stream. The stream is resumable: a
+//! `ResumeSequence` in request data replays only outbox rows past what the
+//! client has already seen.
 //!
-//! Deferred (Epic 5): the wallet-ownership check is optional this slice
-//! (read-only status; `epics.md` Story 4.1 AC3) and is omitted. The real
-//! WebSocket transport (`async_graphql_axum::GraphQLSubscription`) stays in
-//! galoy for the prototype — it would thread a reconnecting client's
-//! last-acked sequence in as `ResumeSequence`, exactly as the synthetic test
-//! does (Fact 4).
+//! Not wired here (Epic 5): the wallet-ownership check (this op is read-only)
+//! and the real WebSocket transport — a reconnecting client's last-acked
+//! sequence would arrive as `ResumeSequence`, as the synthetic test supplies
+//! it. The GraphQL types match galoy exactly; see ADR-0008 for the full design.
 
 use std::str::FromStr;
 
@@ -171,33 +165,24 @@ async fn run_status_stream(
             _ = tx.closed() => return,
             _ = cancel.cancelled() => return,
             recv = broadcast_rx.recv() => match recv {
-                Ok(sequence) => {
-                    if sequence <= cursor {
+                // The ingest task already read the row, so live events arrive
+                // hydrated — filter by reference_id in memory, no DB read.
+                Ok(event) => {
+                    if event.sequence <= cursor {
                         continue;
                     }
-                    match fanout.publisher().find_by_sequence(sequence).await {
-                        Ok(Some(event)) => {
-                            cursor = sequence;
-                            if event.reference_id == reference {
-                                if let Flow::Stop = emit_for_event(
-                                    &app,
-                                    payment_hash,
-                                    event.domain_event,
-                                    &mut emitter,
-                                    &tx,
-                                )
-                                .await
-                                {
-                                    return;
-                                }
-                            }
-                        }
-                        Ok(None) => {
-                            cursor = sequence;
-                            warn!(sequence, "subscription: event not found for notification");
-                        }
-                        Err(e) => {
-                            error!(sequence, error = %e, "subscription: failed to fetch event");
+                    cursor = event.sequence;
+                    if event.reference_id == reference {
+                        if let Flow::Stop = emit_for_event(
+                            &app,
+                            payment_hash,
+                            event.domain_event,
+                            &mut emitter,
+                            &tx,
+                        )
+                        .await
+                        {
+                            return;
                         }
                     }
                 }

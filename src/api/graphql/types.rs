@@ -323,17 +323,9 @@ impl SatAmountPayload {
 }
 
 // ---------------------------------------------------------------------------
-// Invoice payment-status subscription types (Slice 6) — galoy parity.
-// SDL must match `blink/core/api/src/graphql/public/schema.graphql`
-// byte-for-byte (Story 5.1 diffs against galoy's SDL): enum :597-601,
-// inputs :694-704, payload :706-712. No `CANCELLED` value — an LN
-// cancellation surfaces on the wire as `EXPIRED` (ADR-0008).
+// Invoice payment-status subscription types
 // ---------------------------------------------------------------------------
 
-/// Wire status of an invoice. `Canceled` (gateway-internal) maps to
-/// `EXPIRED`; there is deliberately no `CANCELLED` value (galoy parity).
-/// async-graphql screaming-snake-cases the variants, so these render as
-/// `EXPIRED | PAID | PENDING`.
 #[derive(Enum, Copy, Clone, Eq, PartialEq, Debug)]
 #[graphql(name = "InvoicePaymentStatus")]
 pub enum InvoicePaymentStatus {
@@ -342,8 +334,6 @@ pub enum InvoicePaymentStatus {
     Pending,
 }
 
-/// BOLT11 payment preimage (32-byte preimage, hex-encoded). Modeled on
-/// the `LnPaymentSecret` scalar; galoy's `paymentPreimage` field type.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LnPaymentPreImage(pub String);
 
