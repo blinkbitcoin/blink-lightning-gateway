@@ -430,3 +430,49 @@ async fn resume_from_sequence_backfills_without_duplicate_or_gap() {
         "resume-from-held completes after PAID"
     );
 }
+
+// AC7 regression: resuming on an invoice that is already terminal with NO
+// outbox row past the cursor (an Open invoice past `expiry_at` emits no row)
+// must re-derive the terminal status from the aggregate and complete — not
+// fall through to the live loop and hang forever waiting on `recv`.
+#[tokio::test]
+async fn resume_on_expired_invoice_without_events_completes() {
+    let db = TestDatabase::new().await.expect("test db");
+    let (_app, schema) = setup(&db).await;
+
+    // Seed an Open invoice already past expiry (mirrors
+    // `open_past_expiry_emits_expired`); no outbox row exists for it.
+    let preimage = Preimage::from([0x66; 32]);
+    let hash = preimage.payment_hash();
+    let new = NewInvoice {
+        id: InvoiceId::new(),
+        payment_hash: hash,
+        payment_preimage: preimage,
+        wallet_id: WalletId::from(Uuid::now_v7()),
+        amount_msat: Some(MilliSatoshi::new(1_000_000)),
+        expiry_at: Timestamp::from(Utc::now() - chrono::Duration::seconds(3600)),
+        bolt_invoice: BoltInvoice::new("lnbc-expired-resume"),
+        external_id: "ext-expired-resume".to_owned(),
+        created_at: Timestamp::now(),
+    };
+    Invoices::new(&db.pool)
+        .create(new)
+        .await
+        .expect("seed invoice");
+
+    // Resume mode skips the fresh initial-status path; with nothing to
+    // backfill the fix derives EXPIRED from the aggregate, then completes.
+    let mut stream =
+        schema.execute_stream(Request::new(by_hash_query(&hash)).data(ResumeSequence(0)));
+
+    let expired = next_payload(next_within(&mut stream).await);
+    assert_eq!(expired["status"], serde_json::json!("EXPIRED"));
+
+    let end = tokio::time::timeout(Duration::from_secs(10), stream.next())
+        .await
+        .expect("stream completes within 10s");
+    assert!(
+        end.is_none(),
+        "resume on a terminal invoice completes instead of hanging, got {end:?}"
+    );
+}

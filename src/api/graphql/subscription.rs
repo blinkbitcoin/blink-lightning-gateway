@@ -32,7 +32,7 @@ use super::types::{
 };
 use crate::app::App;
 use crate::invoice::entity::{Invoice, InvoiceState};
-use crate::outbox::{GatewayDomainEvent, OutboxFanout};
+use crate::outbox::{GatewayDomainEvent, OutboxFanout, MAX_BACKFILL_EVENTS};
 use crate::primitives::PaymentHash;
 
 /// Per-subscriber payload buffer. A per-invoice stream emits at most a
@@ -156,6 +156,25 @@ async fn run_status_stream(
             {
                 return;
             }
+            // Backfill drained no terminal event, but the invoice may already
+            // be terminal with no further outbox row (settled/canceled at or
+            // before the resume point, or `Open` past `expiry_at`, which emits
+            // no row). Re-derive from the aggregate so the resumed stream
+            // reports the outcome and completes instead of hanging on `recv`.
+            let invoice = lookup_invoice(&app, payment_hash).await;
+            let status = initial_status(
+                invoice
+                    .as_ref()
+                    .map(|i| (i.state, i.expiry_at.into_inner())),
+                Utc::now(),
+            );
+            if is_terminal(status) {
+                if let Some(status) = emitter.next(status) {
+                    let payload = build_payload(status, payment_hash, invoice.as_ref());
+                    let _ = tx.send(payload).await;
+                }
+                return;
+            }
         }
     }
 
@@ -232,6 +251,30 @@ async fn drain_backfill(
     emitter: &mut StatusEmitter,
     tx: &mpsc::Sender<LnInvoicePaymentStatusPayload>,
 ) -> Flow {
+    // Bound the gap-fill the same way the gRPC `subscription_loop` does
+    // (`api/grpc/service.rs:82`): refuse an unbounded scan rather than page the
+    // whole outbox, and tell the client to reconnect from a recent sequence.
+    match fanout.publisher().count_after(*cursor).await {
+        Ok(count) if count > MAX_BACKFILL_EVENTS => {
+            warn!(
+                count,
+                max = MAX_BACKFILL_EVENTS,
+                payment_hash = %payment_hash,
+                "subscription backfill exceeds MAX_BACKFILL_EVENTS; refusing to page"
+            );
+            let _ = tx
+                .send(error_payload(format!(
+                    "too many events to backfill ({count}); reconnect from a more recent sequence"
+                )))
+                .await;
+            return Flow::Stop;
+        }
+        Ok(_) => {}
+        Err(e) => {
+            error!(error = %e, payment_hash = %payment_hash, "subscription backfill count failed");
+            return Flow::Stop;
+        }
+    }
     loop {
         let batch = match fanout.publisher().fetch_after_batch(*cursor).await {
             Ok(b) => b,
